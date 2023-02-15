@@ -29,9 +29,9 @@ class SendWebhookJob < ApplicationJob
     'subscription.terminated' => Webhooks::Subscriptions::TerminatedService,
   }.freeze
 
-  def perform(webhook_type, object, options = {})
+  def perform(webhook_type, object, options = {}, webhook_id = nil)
     raise(NotImplementedError) unless WEBHOOK_SERVICES.include?(webhook_type)
 
-    WEBHOOK_SERVICES.fetch(webhook_type).new(object:, options:).call
+    WEBHOOK_SERVICES.fetch(webhook_type).new(object:, options:, webhook_id:).call
   end
 end
