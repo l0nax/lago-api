@@ -20,7 +20,7 @@ module Webhooks
         object_type => object_serializer.serialize,
       }
 
-      preprocess_webhook(current_webhoook, payload)
+      preprocess_webhook(current_webhook, payload)
 
       http_client = LagoHttpClient::Client.new(current_organization.webhook_url)
       headers = generate_headers(payload)
@@ -31,7 +31,7 @@ module Webhooks
       fail_webhook(current_webhook, e)
 
       # NOTE: By default, Lago is retrying 3 times a webhook
-      return if current_webhook.attempts == 3
+      return if current_webhook.retries == 3
 
       SendWebhookJob.set(wait: wait_value)
         .perform_later(webhook_type, object, options, current_webhook.id)
@@ -81,22 +81,21 @@ module Webhooks
     def current_webhook
       @current_webhook ||= current_organization.webhooks.find_or_initialize_by(
         id: webhook_id,
-        webhook_type:,
-        object_id: object&.id,
-        object_type: object&.class,
-        endpoint: current_organization.webhook_url,
       )
     end
 
-    def preprocess_webhook(webhook)
+    def preprocess_webhook(webhook, payload)
+      webhook.webhook_type = webhook_type
+      webhook.object_id = object.is_a?(Hash) ? object.fetch(:id, nil) : object&.id
+      webhook.object_type = object.is_a?(Hash) ? object.fetch(:class, nil) : object&.class&.to_s
       webhook.payload = payload.to_json
-      webhook.attempts += 1
-      webhook.retried_at = DateTime.zone.now unless webhook.attempts == 1
+      webhook.retries += 1
+      webhook.retried_at = DateTime.zone.now unless webhook.retries == 1
     end
 
     def succeed_webhook(webhook, response)
-      webhook.http_status = response.status.to_i
-      webhook.response = response.to_json
+      webhook.http_status = response&.status&.to_i
+      webhook.response = response&.to_json
       webhook.succeeded!
     end
 
@@ -108,7 +107,7 @@ module Webhooks
 
     def wait_value
       # NOTE: This is based on the Rails Active Job wait algorithm
-      executions = current_webhook.attempts
+      executions = current_webhook.retries
       ((executions**4) + (Kernel.rand * (executions**4) * jitter)) + 2
     end
   end
