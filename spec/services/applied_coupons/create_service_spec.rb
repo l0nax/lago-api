@@ -21,14 +21,14 @@ RSpec.describe AppliedCoupons::CreateService, type: :service do
     {
       amount_cents:,
       amount_currency:,
-      percentage_rate:,
+      percentage_rate:
     }
   end
 
   let(:create_subscription) { customer.present? }
 
   before do
-    create(:active_subscription, customer:) if create_subscription
+    create(:subscription, customer:) if create_subscription
   end
 
   describe 'create' do
@@ -57,8 +57,8 @@ RSpec.describe AppliedCoupons::CreateService, type: :service do
           customer_id: applied_coupon.customer.id,
           coupon_code: applied_coupon.coupon.code,
           coupon_name: applied_coupon.coupon.name,
-          organization_id: applied_coupon.coupon.organization_id,
-        },
+          organization_id: applied_coupon.coupon.organization_id
+        }
       )
     end
 
@@ -69,7 +69,7 @@ RSpec.describe AppliedCoupons::CreateService, type: :service do
           status: 'active',
           organization:,
           coupon_type: 'percentage',
-          percentage_rate: 10.00,
+          percentage_rate: 10.00
         )
       end
 
@@ -167,7 +167,7 @@ RSpec.describe AppliedCoupons::CreateService, type: :service do
       end
     end
 
-    context 'when coupon is already applied with the same plan limitation' do
+    context 'when coupon is already applied with the plan limitation' do
       let(:plan) { create(:plan, organization:) }
       let(:coupon_old) { create(:coupon, status: 'active', organization:, limited_plans: true) }
       let(:coupon) { create(:coupon, status: 'active', organization:, limited_plans: true) }
@@ -176,15 +176,61 @@ RSpec.describe AppliedCoupons::CreateService, type: :service do
 
       before do
         coupon_plan_old
-        coupon_plan
         create(:applied_coupon, customer:, coupon: coupon_old)
       end
 
-      it 'fails' do
-        aggregate_failures do
-          expect(create_result).not_to be_success
-          expect(create_result.error).to be_a(BaseService::MethodNotAllowedFailure)
-          expect(create_result.error.code).to eq('plan_overlapping')
+      context 'when newly applied coupon has the same plan limitation' do
+        before { coupon_plan }
+
+        it 'fails' do
+          aggregate_failures do
+            expect(create_result).not_to be_success
+            expect(create_result.error).to be_a(BaseService::MethodNotAllowedFailure)
+            expect(create_result.error.code).to eq('plan_overlapping')
+          end
+        end
+      end
+
+      context 'when newly applied coupon has the BM limitation that overlaps with already applied plan limitation' do
+        let(:billable_metric) { create(:billable_metric, organization:) }
+        let(:charge) { create(:standard_charge, plan:, billable_metric:) }
+        let(:coupon) { create(:coupon, status: 'active', organization:, limited_billable_metrics: true) }
+        let(:coupon_billable_metric) { create(:coupon_billable_metric, coupon:, billable_metric:) }
+
+        before do
+          charge
+          coupon_billable_metric
+        end
+
+        it 'fails' do
+          aggregate_failures do
+            expect(create_result).not_to be_success
+            expect(create_result.error).to be_a(BaseService::MethodNotAllowedFailure)
+            expect(create_result.error.code).to eq('plan_overlapping')
+          end
+        end
+      end
+
+      context 'when newly applied coupon has the plan limitation that overlaps with already applied BM limitation' do
+        let(:coupon_old) { create(:coupon, status: 'active', organization:, limited_billable_metrics: true) }
+        let(:coupon_bm_old) { create(:coupon_billable_metric, coupon: coupon_old, billable_metric:) }
+        let(:billable_metric) { create(:billable_metric, organization:) }
+        let(:charge) { create(:standard_charge, plan:, billable_metric:) }
+        let(:coupon) { create(:coupon, status: 'active', organization:, limited_plans: true) }
+        let(:coupon_plan) { create(:coupon_plan, coupon:, plan:) }
+
+        before do
+          charge
+          coupon_bm_old
+          coupon_plan
+        end
+
+        it 'fails' do
+          aggregate_failures do
+            expect(create_result).not_to be_success
+            expect(create_result.error).to be_a(BaseService::MethodNotAllowedFailure)
+            expect(create_result.error.code).to eq('plan_overlapping')
+          end
         end
       end
     end

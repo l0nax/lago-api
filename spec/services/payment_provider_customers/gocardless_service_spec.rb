@@ -5,7 +5,7 @@ require 'rails_helper'
 RSpec.describe PaymentProviderCustomers::GocardlessService, type: :service do
   subject(:gocardless_service) { described_class.new(gocardless_customer) }
 
-  let(:customer) { create(:customer, organization: organization) }
+  let(:customer) { create(:customer, organization:) }
   let(:gocardless_provider) { create(:gocardless_provider) }
   let(:organization) { gocardless_provider.organization }
   let(:gocardless_client) { instance_double(GoCardlessPro::Client) }
@@ -14,7 +14,7 @@ RSpec.describe PaymentProviderCustomers::GocardlessService, type: :service do
   let(:gocardless_billing_request_flow_service) { instance_double(GoCardlessPro::Services::BillingRequestFlowsService) }
 
   let(:gocardless_customer) do
-    create(:gocardless_customer, customer: customer, provider_customer_id: nil)
+    create(:gocardless_customer, customer:, provider_customer_id: nil)
   end
 
   describe '.create' do
@@ -25,6 +25,22 @@ RSpec.describe PaymentProviderCustomers::GocardlessService, type: :service do
         .and_return(gocardless_customers_service)
       allow(gocardless_customers_service).to receive(:create)
         .and_return(GoCardlessPro::Resources::Customer.new('id' => '123'))
+    end
+
+    context 'when all customer details are present' do
+      it 'creates a customer with company_name, given_name, and family_name' do
+        gocardless_service.create
+        expect(gocardless_customers_service).to have_received(:create).with(
+          hash_including(
+            params: {
+              email: customer.email,
+              company_name: customer.name,
+              given_name: customer.firstname,
+              family_name: customer.lastname
+            }
+          )
+        )
+      end
     end
 
     it 'creates the gocardless customer' do
@@ -52,7 +68,7 @@ RSpec.describe PaymentProviderCustomers::GocardlessService, type: :service do
 
     context 'when customer already have a gocardless customer id' do
       let(:gocardless_customer) do
-        create(:gocardless_customer, customer: customer, provider_customer_id: 'cus_123456')
+        create(:gocardless_customer, customer:, provider_customer_id: 'cus_123456')
       end
 
       it 'does not call gocardless API' do
@@ -65,7 +81,7 @@ RSpec.describe PaymentProviderCustomers::GocardlessService, type: :service do
     context 'when failing to create the customer' do
       it 'delivers an error webhook' do
         allow(GoCardlessPro::Client).to receive(:new)
-          .and_raise(GoCardlessPro::ApiError.new({ 'message' => 'error' }))
+          .and_raise(GoCardlessPro::ApiError.new({'message' => 'error'}))
 
         expect { gocardless_service.create }
           .to raise_error(GoCardlessPro::ApiError)
@@ -76,10 +92,16 @@ RSpec.describe PaymentProviderCustomers::GocardlessService, type: :service do
             customer,
             provider_error: {
               message: 'error',
-              error_code: nil,
-            },
+              error_code: nil
+            }
           )
       end
+    end
+  end
+
+  describe '#update' do
+    it 'returns result' do
+      expect(gocardless_service.update).to be_a(BaseService::Result)
     end
   end
 
@@ -115,6 +137,24 @@ RSpec.describe PaymentProviderCustomers::GocardlessService, type: :service do
         expect(gocardless_billing_request_flow_service).to have_received(:create)
         expect(SendWebhookJob).to have_been_enqueued
           .with('customer.checkout_url_generated', customer, checkout_url: 'https://example.com')
+      end
+    end
+  end
+
+  describe '#success_redirect_url' do
+    subject(:success_redirect_url) { gocardless_service.__send__(:success_redirect_url) }
+
+    context 'when payment provider has success redirect url' do
+      it "returns payment provider's success redirect url" do
+        expect(success_redirect_url).to eq(gocardless_provider.success_redirect_url)
+      end
+    end
+
+    context 'when payment provider has no success redirect url' do
+      let(:gocardless_provider) { create(:gocardless_provider, success_redirect_url: nil) }
+
+      it 'returns the default success redirect url' do
+        expect(success_redirect_url).to eq(PaymentProviders::GocardlessProvider::SUCCESS_REDIRECT_URL)
       end
     end
   end

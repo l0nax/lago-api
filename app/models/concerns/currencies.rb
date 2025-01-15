@@ -18,6 +18,7 @@ module Currencies
     BBD: 'Barbadian Dollar',
     BDT: 'Bangladeshi Taka',
     BGN: 'Bulgarian Lev',
+    BHD: 'Bahraini Dinar',
     BIF: 'Burundian Franc',
     BMD: 'Bermudian Dollar',
     BND: 'Brunei Dollar',
@@ -61,14 +62,17 @@ module Currencies
     IDR: 'Indonesian Rupiah',
     ILS: 'Israeli New Sheqel',
     INR: 'Indian Rupee',
+    IRR: 'Iranian Rial',
     ISK: 'Icelandic Króna',
     JMD: 'Jamaican Dollar',
+    JOD: 'Jordanian Dinar',
     JPY: 'Japanese Yen',
     KES: 'Kenyan Shilling',
     KGS: 'Kyrgyzstani Som',
     KHR: 'Cambodian Riel',
     KMF: 'Comorian Franc',
     KRW: 'South Korean Won',
+    KWD: 'Kuwaiti Dinar',
     KYD: 'Cayman Islands Dollar',
     KZT: 'Kazakhstani Tenge',
     LAK: 'Lao Kip',
@@ -140,7 +144,7 @@ module Currencies
     XPF: 'Cfp Franc',
     YER: 'Yemeni Rial',
     ZAR: 'South African Rand',
-    ZMW: 'Zambian Kwacha',
+    ZMW: 'Zambian Kwacha'
   }.freeze
 
   included do

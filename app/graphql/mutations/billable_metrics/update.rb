@@ -5,16 +5,12 @@ module Mutations
     class Update < BaseMutation
       include AuthenticableApiUser
 
+      REQUIRED_PERMISSION = 'billable_metrics:update'
+
       graphql_name 'UpdateBillableMetric'
       description 'Updates an existing Billable metric'
 
-      argument :id, String, required: true
-      argument :name, String, required: true
-      argument :code, String, required: true
-      argument :description, String
-      argument :aggregation_type, Types::BillableMetrics::AggregationTypeEnum, required: true
-      argument :field_name, String, required: false
-      argument :group, GraphQL::Types::JSON, required: false
+      input_object_class Types::BillableMetrics::UpdateInput
 
       type Types::BillableMetrics::Object
 

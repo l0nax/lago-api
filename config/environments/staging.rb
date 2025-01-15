@@ -23,7 +23,12 @@ Rails.application.configure do
     :local
   end
 
-  config.log_level = :info
+  config.log_level = if ENV['LAGO_LOG_LEVEL'].present? && ENV['LAGO_LOG_LEVEL'] != ''
+    ENV['LAGO_LOG_LEVEL'].downcase.to_sym
+  else
+    :info
+  end
+
   config.log_tags = [:request_id]
   config.action_mailer.perform_caching = false
   config.i18n.fallbacks = true
@@ -31,14 +36,17 @@ Rails.application.configure do
   config.log_formatter = ::Logger::Formatter.new
 
   if ENV['RAILS_LOG_TO_STDOUT'].present?
-    logger           = ActiveSupport::Logger.new($stdout)
+    logger = ActiveSupport::Logger.new($stdout)
     logger.formatter = config.log_formatter
-    config.logger    = ActiveSupport::TaggedLogging.new(logger)
+    config.logger = ActiveSupport::TaggedLogging.new(logger)
   end
 
   config.active_record.dump_schema_after_migration = false
 
   config.hosts << /[a-z0-9-]+\.staging\.getlago\.com/
+  config.host_authorization = {
+    exclude: ->(request) { request.path == "/health" }
+  }
 
   config.license_url = 'http://license-staging-web.default.svc.cluster.local'
 
@@ -46,14 +54,29 @@ Rails.application.configure do
     config.cache_store = :mem_cache_store, ENV['LAGO_MEMCACHE_SERVERS'].split(',')
 
   elsif ENV['LAGO_REDIS_CACHE_URL'].present?
-    config.cache_store = :redis_cache_store, {
-      url: ENV['LAGO_REDIS_CACHE_URL'],
-      error_handler: ->(method:, returning:, exception:) {
-        Rails.logger.error(exception.message)
-        Rails.logger.error(exception.backtrace.join("\n"))
+    config.cache_store =
+      :redis_cache_store,
+      {
+        url: ENV['LAGO_REDIS_CACHE_URL'],
+        pool: {size: ENV.fetch('LAGO_REDIS_CACHE_POOL_SIZE', 5)},
+        error_handler: lambda { |method:, returning:, exception:|
+          Rails.logger.error(exception.message)
+          Rails.logger.error(exception.backtrace.join("\n"))
 
-        Sentry.capture_exception(exception)
-      },
+          Sentry.capture_exception(exception)
+        }
+      }
+  end
+
+  if ENV['LAGO_SMTP_ADDRESS'].present? && !ENV['LAGO_SMTP_ADDRESS'].empty?
+    config.action_mailer.perform_deliveries = true
+    config.action_mailer.raise_delivery_errors = true
+    config.action_mailer.delivery_method = :smtp
+    config.action_mailer.smtp_settings = {
+      address: ENV['LAGO_SMTP_ADDRESS'],
+      port: ENV['LAGO_SMTP_PORT']
     }
   end
+
+  OpenTelemetry::SDK.configure(&:use_all) if ENV['OTEL_EXPORTER'].present?
 end

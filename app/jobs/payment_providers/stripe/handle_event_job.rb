@@ -5,10 +5,13 @@ module PaymentProviders
     class HandleEventJob < ApplicationJob
       queue_as 'providers'
 
+      # NOTE: Sometimes, the stripe webhook is received before the DB update of the impacted resource
+      retry_on BaseService::NotFoundFailure
+
       def perform(organization:, event:)
-        result = PaymentProviders::StripeService.new.handle_event(
-          organization: organization,
-          event_json: event,
+        result = PaymentProviders::Stripe::HandleEventService.call(
+          organization:,
+          event_json: event
         )
         result.raise_if_error!
       end

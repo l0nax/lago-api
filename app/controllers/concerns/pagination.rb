@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 module Pagination
   extend ActiveSupport::Concern
 
@@ -22,6 +24,6 @@ module Pagination
         'total_pages' => 0,
         'total_count' => 0
       }
-     end
+    end
   end
 end

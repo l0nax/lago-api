@@ -12,17 +12,17 @@ RSpec.describe Organizations::UpdateInvoiceGracePeriodService, type: :service do
 
   describe '#call' do
     let(:invoice_to_be_finalized) do
-      create(:invoice, status: :draft, customer:, created_at: DateTime.parse('19 Jun 2022'), organization:)
+      create(:invoice, status: :draft, customer:, issuing_date: DateTime.parse('19 Jun 2022').to_date, organization:)
     end
 
     let(:invoice_to_not_be_finalized) do
-      create(:invoice, status: :draft, customer:, created_at: DateTime.parse('21 Jun 2022'), organization:)
+      create(:invoice, status: :draft, customer:, issuing_date: DateTime.parse('21 Jun 2022').to_date, organization:)
     end
 
     before do
       invoice_to_be_finalized
       invoice_to_not_be_finalized
-      allow(Invoices::FinalizeService).to receive(:call)
+      allow(Invoices::FinalizeJob).to receive(:perform_later)
     end
 
     it 'updates invoice grace period on organization' do
@@ -36,8 +36,8 @@ RSpec.describe Organizations::UpdateInvoiceGracePeriodService, type: :service do
         result = update_service.call
 
         expect(result.organization.invoice_grace_period).to eq(2)
-        expect(Invoices::FinalizeService).not_to have_received(:call).with(invoice: invoice_to_not_be_finalized)
-        expect(Invoices::FinalizeService).to have_received(:call).with(invoice: invoice_to_be_finalized)
+        expect(Invoices::FinalizeJob).not_to have_received(:perform_later).with(invoice_to_not_be_finalized)
+        expect(Invoices::FinalizeJob).to have_received(:perform_later).with(invoice_to_be_finalized)
       end
     end
 
@@ -47,6 +47,45 @@ RSpec.describe Organizations::UpdateInvoiceGracePeriodService, type: :service do
       travel_to(current_date) do
         expect { update_service.call }.to change { invoice_to_not_be_finalized.reload.issuing_date }
           .to(DateTime.parse('23 Jun 2022'))
+          .and change { invoice_to_not_be_finalized.reload.payment_due_date }
+          .to(DateTime.parse('23 Jun 2022'))
+      end
+    end
+
+    context 'when customer has net_payment_term' do
+      let(:customer) { create(:customer, organization:, net_payment_term: 3) }
+
+      it 'updates issuing_date on draft invoices' do
+        current_date = DateTime.parse('22 Jun 2022')
+
+        travel_to(current_date) do
+          expect { update_service.call }.to change { invoice_to_not_be_finalized.reload.issuing_date }
+            .to(DateTime.parse('23 Jun 2022'))
+            .and change { invoice_to_not_be_finalized.reload.payment_due_date }
+            .to(DateTime.parse('26 Jun 2022'))
+        end
+      end
+    end
+
+    context 'when grace_period is the same as the current one' do
+      let(:grace_period) { organization.invoice_grace_period }
+
+      it 'does not finalize any draft invoices' do
+        current_date = DateTime.parse('22 Jun 2022')
+
+        travel_to(current_date) do
+          update_service.call
+
+          expect(Invoices::FinalizeJob).not_to have_received(:perform_later)
+        end
+      end
+
+      it 'does not update issuing_date on draft invoices' do
+        current_date = DateTime.parse('22 Jun 2022')
+
+        travel_to(current_date) do
+          expect { update_service.call }.not_to change { invoice_to_not_be_finalized.reload.issuing_date }
+        end
       end
     end
   end

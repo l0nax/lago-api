@@ -3,6 +3,8 @@
 module Charges
   module Validators
     class GraduatedService < Charges::Validators::BaseService
+      include ::Validators::RangeBoundsValidator
+
       def valid?
         if ranges.blank?
           add_error(field: :graduated_ranges, error_code: 'missing_graduated_ranges')
@@ -25,7 +27,7 @@ module Charges
       private
 
       def ranges
-        charge.properties['graduated_ranges'].map(&:with_indifferent_access)
+        properties['graduated_ranges'].map(&:with_indifferent_access)
       end
 
       def validate_amounts(range)
@@ -36,13 +38,6 @@ module Charges
         return if ::Validators::DecimalAmountService.new(range[:flat_amount]).valid_amount?
 
         add_error(field: :flat_amount, error_code: 'invalid_amount')
-      end
-
-      def valid_bounds?(range, index, next_from_value)
-        range[:from_value] == (next_from_value) && (
-          index == (ranges.size - 1) && range[:to_value].nil? ||
-          index < (ranges.size - 1) && (range[:to_value] || 0) > range[:from_value]
-        )
       end
     end
   end

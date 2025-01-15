@@ -9,6 +9,13 @@ module Subscriptions
         monthly_service.compute_from_date(billing_date).month == subscription_at.month
       end
 
+      def first_month_in_first_yearly_period?
+        return billing_date.month == 1 && billing_date.year == subscription_at.year if calendar?
+
+        billing_from_date = monthly_service.compute_from_date(billing_date)
+        billing_from_date.month == subscription_at.month && billing_from_date.year == subscription_at.year
+      end
+
       private
 
       def compute_base_date
@@ -44,7 +51,7 @@ module Subscriptions
           return subscription.anniversary? ? previous_anniversary_day(billing_date) : billing_date.beginning_of_year
         end
 
-        return from_datetime if plan.pay_in_arrear?
+        return compute_from_date if plan.pay_in_arrear?
         return base_date.beginning_of_year if calendar?
 
         previous_anniversary_day(base_date)
@@ -78,7 +85,7 @@ module Subscriptions
       end
 
       def previous_anniversary_day(date)
-        year = (date.month < subscription_at.month) ? (date.year - 1) : date.year
+        year = period_started_in_last_year?(date) ? (date.year - 1) : date.year
         month = subscription_at.month
         day = subscription_at.day
 
@@ -96,9 +103,16 @@ module Subscriptions
       end
 
       def compute_charges_duration(from_date:)
-        return monthly_service.compute_charges_duration(from_date: from_date) if plan.bill_charges_monthly
+        return monthly_service.compute_charges_duration(from_date:) if plan.bill_charges_monthly
 
-        compute_duration(from_date: from_date)
+        compute_duration(from_date:)
+      end
+
+      def period_started_in_last_year?(date)
+        return true if date.month < subscription_at.month
+        return true if (date.month == subscription_at.month) && (date.day < subscription_at.day)
+
+        false
       end
     end
   end

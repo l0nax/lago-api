@@ -5,6 +5,8 @@ module Mutations
     class Update < BaseMutation
       include AuthenticableApiUser
 
+      REQUIRED_PERMISSION = 'credit_notes:update'
+
       graphql_name 'UpdateCreditNote'
       description 'Updates an existing Credit Note'
 
@@ -16,7 +18,7 @@ module Mutations
       def resolve(**args)
         result = ::CreditNotes::UpdateService.new(
           credit_note: context[:current_user].credit_notes.find_by(id: args[:id]),
-          refund_status: args[:refund_status],
+          refund_status: args[:refund_status]
         ).call
 
         result.success? ? result.credit_note : result_error(result)

@@ -17,11 +17,11 @@ describe 'Delete Customer Scenarios', :scenarios, type: :request do
         {
           external_customer_id: customer.external_id,
           external_id: customer.external_id,
-          plan_code: plan.code,
-        },
+          plan_code: plan.code
+        }
       )
 
-      create(:standard_charge, plan:, billable_metric: metric, properties: { amount: '3' })
+      create(:standard_charge, plan:, billable_metric: metric, properties: {amount: '3'})
     end
 
     subscription = customer.subscriptions.find_by(external_id: customer.external_id)
@@ -50,8 +50,8 @@ describe 'Delete Customer Scenarios', :scenarios, type: :request do
           external_customer_id: customer.external_id,
           external_id: customer.external_id,
           plan_code: downgrade_plan.code,
-          subscription_at: '2023-02-01T00:00:00Z',
-        },
+          subscription_at: '2023-02-01T00:00:00Z'
+        }
       )
       pending_subscription = customer.subscriptions.pending.first
 
@@ -66,14 +66,14 @@ describe 'Delete Customer Scenarios', :scenarios, type: :request do
           amount_currency: 'EUR',
           expiration: 'time_limit',
           expiration_at: Time.current + 15.days,
-          reusable: false,
-        },
+          reusable: false
+        }
       )
       apply_coupon(
         {
           external_customer_id: customer.external_id,
-          coupon_code: 'coupon1_code',
-        },
+          coupon_code: 'coupon1_code'
+        }
       )
       applied_coupon = customer.applied_coupons.active.first
 
@@ -86,8 +86,8 @@ describe 'Delete Customer Scenarios', :scenarios, type: :request do
           currency: 'EUR',
           paid_credits: '10',
           granted_credits: '10',
-          expiration_at: Time.current + 15.days,
-        },
+          expiration_at: (Time.current + 15.days).iso8601
+        }
       )
       wallet = customer.wallets.active.first
 

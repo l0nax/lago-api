@@ -5,6 +5,8 @@ module Resolvers
     include AuthenticableApiUser
     include RequiredOrganization
 
+    REQUIRED_PERMISSION = 'credit_notes:view'
+
     description 'Query a single credit note'
 
     argument :id, ID, required: true, description: 'Uniq ID of the credit note'
@@ -12,8 +14,6 @@ module Resolvers
     type Types::CreditNotes::Object, null: true
 
     def resolve(id: nil)
-      validate_organization!
-
       current_organization.credit_notes.finalized.find(id)
     rescue ActiveRecord::RecordNotFound
       not_found_error(resource: 'credit_note')

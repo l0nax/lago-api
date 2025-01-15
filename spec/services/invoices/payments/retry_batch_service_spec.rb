@@ -8,10 +8,10 @@ RSpec.describe Invoices::Payments::RetryBatchService, type: :service do
   let(:customer) { create(:customer, payment_provider: 'stripe') }
   let(:organization) { customer.organization }
 
-  describe '#call_later' do
+  describe '#call_async' do
     it 'enqueues a job to retry all payments' do
       expect do
-        retry_batch_service.call_later
+        retry_batch_service.call_async
       end.to have_enqueued_job(Invoices::Payments::RetryAllJob)
     end
   end
@@ -24,7 +24,7 @@ RSpec.describe Invoices::Payments::RetryBatchService, type: :service do
         customer:,
         status: 'finalized',
         payment_status: 'failed',
-        ready_for_payment_processing: true,
+        ready_for_payment_processing: true
       )
     end
     let(:invoice_second) do
@@ -33,7 +33,7 @@ RSpec.describe Invoices::Payments::RetryBatchService, type: :service do
         customer:,
         status: 'finalized',
         payment_status: 'failed',
-        ready_for_payment_processing: true,
+        ready_for_payment_processing: true
       )
     end
     let(:invoice_third) do
@@ -41,7 +41,7 @@ RSpec.describe Invoices::Payments::RetryBatchService, type: :service do
         :invoice,
         customer:,
         status: 'draft',
-        ready_for_payment_processing: true,
+        ready_for_payment_processing: true
       )
     end
 
@@ -71,7 +71,7 @@ RSpec.describe Invoices::Payments::RetryBatchService, type: :service do
           customer:,
           status: 'finalized',
           payment_status: 'failed',
-          ready_for_payment_processing: false,
+          ready_for_payment_processing: false
         )
       end
 

@@ -10,23 +10,22 @@ module BillableMetrics
     def call
       return result.not_found_failure!(resource: 'billable_metric') unless metric
 
+      BillableMetrics::ExpressionCacheService.expire_cache(metric.organization.id, metric.code)
+
       draft_invoice_ids = Invoice.draft.joins(plans: [:billable_metrics])
-        .where(billable_metrics: { id: metric.id }).distinct.pluck(:id)
+        .where(billable_metrics: {id: metric.id}).distinct.pluck(:id)
 
       ActiveRecord::Base.transaction do
         metric.discard!
         metric.charges.discard_all
-        metric.groups.each do |group|
-          group.discard!
-          group.properties.discard_all
-        end
+
+        discard_filters
+
+        Invoice.where(id: draft_invoice_ids).update_all(ready_to_be_refreshed: true) # rubocop:disable Rails/SkipsModelValidations
       end
 
       # NOTE: Discard all related events asynchronously.
       BillableMetrics::DeleteEventsJob.perform_later(metric)
-
-      # NOTE: Refresh all draft invoices asynchronously.
-      Invoices::RefreshBatchJob.perform_later(draft_invoice_ids)
 
       track_billable_metric_deleted
 
@@ -38,6 +37,14 @@ module BillableMetrics
 
     attr_reader :metric
 
+    def discard_filters
+      metric.filters.each do |filter|
+        filter.filter_values.discard_all
+        filter.charge_filters.discard_all
+        filter.discard!
+      end
+    end
+
     def track_billable_metric_deleted
       SegmentTrackJob.perform_later(
         membership_id: CurrentContext.membership,
@@ -48,8 +55,8 @@ module BillableMetrics
           description: metric.description,
           aggregation_type: metric.aggregation_type,
           aggregation_property: metric.field_name,
-          organization_id: metric.organization_id,
-        },
+          organization_id: metric.organization_id
+        }
       )
     end
   end

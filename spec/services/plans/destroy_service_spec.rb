@@ -57,13 +57,13 @@ RSpec.describe Plans::DestroyService, type: :service do
           nb_percentage_charges: 0,
           nb_graduated_charges: 0,
           nb_package_charges: 0,
-          organization_id: plan.organization_id,
-        },
+          organization_id: plan.organization_id
+        }
       )
     end
 
     context 'with active subscriptions' do
-      let(:subscriptions) { create_list(:active_subscription, 2, plan:) }
+      let(:subscriptions) { create_list(:subscription, 2, plan:) }
 
       before { subscriptions }
 
@@ -80,14 +80,31 @@ RSpec.describe Plans::DestroyService, type: :service do
       end
     end
 
+    context 'with pending subscriptions' do
+      let(:subscriptions) { create_list(:subscription, 2, :pending, plan:) }
+
+      before { subscriptions }
+
+      it 'cancels the subscriptions' do
+        result = destroy_service.call
+
+        aggregate_failures do
+          expect(result).to be_success
+
+          subscriptions.each do |subscription|
+            expect(subscription.reload).to be_canceled
+          end
+        end
+      end
+    end
+
     context 'with draft invoices' do
-      let(:subscription) { create(:active_subscription, plan:) }
+      let(:subscription) { create(:subscription, plan:) }
       let(:invoices) { create_list(:invoice, 2, :draft) }
 
       before do
-        invoices.each do |invoice|
-          create(:invoice_subscription, invoice:, subscription:)
-        end
+        create(:invoice_subscription, invoice: invoices.first, subscription:, invoicing_reason: :subscription_starting)
+        create(:invoice_subscription, invoice: invoices.second, subscription:, invoicing_reason: :subscription_periodic)
       end
 
       it 'finalizes draft invoices' do

@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 class BaseService
+  include AfterCommitEverywhere
+
   class FailedResult < StandardError
     attr_reader :result
 
@@ -10,6 +12,8 @@ class BaseService
       super(message)
     end
   end
+
+  class ThrottlingError < StandardError; end
 
   class NotFoundFailure < FailedResult
     attr_reader :resource
@@ -47,11 +51,22 @@ class BaseService
     private
 
     def format_messages
-      "Validation errors: #{[messages].flatten.join(', ')}"
+      "Validation errors: #{[messages].flatten.join(", ")}"
     end
   end
 
   class ServiceFailure < FailedResult
+    attr_reader :code, :error_message
+
+    def initialize(result, code:, error_message:)
+      @code = code
+      @error_message = error_message
+
+      super(result, "#{code}: #{error_message}")
+    end
+  end
+
+  class UnknownTaxFailure < FailedResult
     attr_reader :code, :error_message
 
     def initialize(result, code:, error_message:)
@@ -69,6 +84,12 @@ class BaseService
       @code = code
 
       super(result, code)
+    end
+  end
+
+  class UnauthorizedFailure < FailedResult
+    def initialize(result, message:)
+      super(result, message)
     end
   end
 
@@ -94,11 +115,11 @@ class BaseService
     end
 
     def not_found_failure!(resource:)
-      fail_with_error!(NotFoundFailure.new(self, resource: resource))
+      fail_with_error!(NotFoundFailure.new(self, resource:))
     end
 
     def not_allowed_failure!(code:)
-      fail_with_error!(MethodNotAllowedFailure.new(self, code: code))
+      fail_with_error!(MethodNotAllowedFailure.new(self, code:))
     end
 
     def record_validation_failure!(record:)
@@ -110,19 +131,27 @@ class BaseService
     end
 
     def single_validation_failure!(error_code:, field: :base)
-      validation_failure!(errors: { field.to_sym => [error_code] })
+      validation_failure!(errors: {field.to_sym => [error_code]})
     end
 
     def service_failure!(code:, message:)
-      fail_with_error!(ServiceFailure.new(self, code: code, error_message: message))
+      fail_with_error!(ServiceFailure.new(self, code:, error_message: message))
     end
 
-    def forbidden_failure!(code: 'feature_unavailable')
-      fail_with_error!(ForbiddenFailure.new(self, code: code))
+    def unknown_tax_failure!(code:, message:)
+      fail_with_error!(UnknownTaxFailure.new(self, code:, error_message: message))
+    end
+
+    def forbidden_failure!(code: "feature_unavailable")
+      fail_with_error!(ForbiddenFailure.new(self, code:))
+    end
+
+    def unauthorized_failure!(message: "unauthorized")
+      fail_with_error!(UnauthorizedFailure.new(self, message:))
     end
 
     def raise_if_error!
-      return if success?
+      return self if success?
 
       raise(error)
     end
@@ -132,19 +161,42 @@ class BaseService
     attr_accessor :failure
   end
 
-  def self.call(...)
-    new(...).call
+  def self.call(*, **, &)
+    LagoTracer.in_span("#{name}#call") do
+      new(*, **).call(&)
+    end
   end
 
-  def initialize(current_user = nil)
+  def self.call_async(*, **, &)
+    LagoTracer.in_span("#{name}#call_async") do
+      new(*, **).call_async(&)
+    end
+  end
+
+  def self.call!(*, **, &)
+    call(*, **, &).raise_if_error!
+  end
+
+  def initialize(args = nil)
     @result = Result.new
     @source = CurrentContext&.source
-    result.user = current_user
   end
 
-  def call
+  def call(**args, &block)
     raise NotImplementedError
   end
+
+  def call!(*, &)
+    call(*, &).raise_if_error!
+  end
+
+  def call_async(**args, &block)
+    raise NotImplementedError
+  end
+
+  protected
+
+  attr_writer :result
 
   private
 
@@ -156,5 +208,9 @@ class BaseService
 
   def graphql_context?
     source&.to_sym == :graphql
+  end
+
+  def at_time_zone(customer: "customers", organization: "organizations")
+    Utils::Timezone.at_time_zone_sql(customer:, organization:)
   end
 end

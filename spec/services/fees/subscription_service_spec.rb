@@ -5,12 +5,15 @@ require 'rails_helper'
 RSpec.describe Fees::SubscriptionService do
   subject(:fees_subscription_service) do
     described_class.new(
-      invoice: invoice,
-      subscription: subscription,
-      boundaries: boundaries,
+      invoice:,
+      subscription:,
+      boundaries:
     )
   end
 
+  let(:organization) { create(:organization) }
+  let(:customer) { create(:customer, organization:) }
+  let(:tax) { create(:tax, organization:, rate: 20) }
   let(:started_at) { Time.zone.parse('2022-01-01 00:01') }
   let(:created_at) { started_at }
   let(:subscription_at) { started_at }
@@ -18,48 +21,51 @@ RSpec.describe Fees::SubscriptionService do
   let(:plan) do
     create(
       :plan,
+      organization:,
       amount_cents: 100,
-      amount_currency: 'EUR',
+      amount_currency: 'EUR'
     )
   end
-  let(:invoice) { create(:invoice, organization: customer.organization) }
+  let(:invoice) { create(:invoice, organization:, customer:) }
   let(:boundaries) do
     {
       from_datetime: Time.zone.parse('2022-03-01 00:00:00'),
       to_datetime: Time.zone.parse('2022-03-31 23:59:59'),
-      timestamp: Time.zone.parse('2022-04-02 00:00').end_of_month.to_i,
+      timestamp: Time.zone.parse('2022-04-02 00:00').end_of_month.to_i
     }
   end
-
-  let(:customer) { create(:customer) }
 
   let(:subscription) do
     create(
       :subscription,
-      plan: plan,
-      started_at: started_at,
-      subscription_at: subscription_at,
-      customer: customer,
-      created_at: created_at,
-      external_id: 'sub_id',
+      plan:,
+      started_at:,
+      subscription_at:,
+      customer:,
+      created_at:,
+      external_id: 'sub_id'
     )
   end
+
+  before { tax }
 
   context 'when invoice is on a full period' do
     it 'creates a fee' do
       result = fees_subscription_service.create
-      created_fee = result.fee
 
-      aggregate_failures do
-        expect(created_fee.id).not_to be_nil
-        expect(created_fee.invoice_id).to eq(invoice.id)
-        expect(created_fee.amount_cents).to eq(plan.amount_cents)
-        expect(created_fee.amount_currency).to eq(plan.amount_currency)
-        expect(created_fee.vat_amount_cents).to eq(20)
-        expect(created_fee.vat_rate).to eq(20.0)
-        expect(created_fee.units).to eq(1)
-        expect(created_fee.events_count).to be_nil
-      end
+      expect(result.fee).to have_attributes(
+        id: String,
+        invoice_id: invoice.id,
+        amount_cents: 100,
+        precise_amount_cents: 100.0,
+        amount_currency: 'EUR',
+        units: 1,
+        events_count: nil,
+        payment_status: 'pending',
+        unit_amount_cents: 100,
+        precise_unit_amount: 1,
+        amount_details: {'plan_amount_cents' => 100}
+      )
     end
 
     context 'when plan has a trial period' do
@@ -73,22 +79,192 @@ RSpec.describe Fees::SubscriptionService do
 
         it 'creates a fee with prorated amount based on trial' do
           result = fees_subscription_service.create
-          created_fee = result.fee
 
-          aggregate_failures do
-            expect(created_fee.id).not_to be_nil
-            expect(created_fee.amount_cents).to eq(90)
-          end
+          expect(result.fee).to have_attributes(
+            id: String,
+            amount_cents: 90,
+            precise_amount_cents: 90.32258064516128,
+            unit_amount_cents: 90,
+            precise_unit_amount: 0.9,
+            amount_details: {'plan_amount_cents' => 100}
+          )
         end
       end
 
-      context 'when trial end after end of period' do
+      context 'when trial ends after end of period' do
         let(:trial_duration) { 45 }
 
         it 'creates a fee with zero amount' do
           result = fees_subscription_service.create
 
-          expect(result.fee.amount_cents).to eq(0)
+          expect(result.fee).to have_attributes(
+            amount_cents: 0,
+            precise_amount_cents: 0.0
+          )
+        end
+      end
+    end
+
+    context 'when there is adjusted fee' do
+      let(:adjusted_fee) do
+        create(
+          :adjusted_fee,
+          invoice:,
+          subscription:,
+          properties:,
+          adjusted_units: true,
+          adjusted_amount: false,
+          units: 3
+        )
+      end
+      let(:properties) do
+        {
+          from_datetime: boundaries[:from_datetime],
+          to_datetime: boundaries[:to_datetime]
+        }
+      end
+
+      before do
+        adjusted_fee
+        invoice.draft!
+      end
+
+      context 'with adjusted units' do
+        it 'creates a fee' do
+          result = fees_subscription_service.create
+
+          expect(result.fee).to have_attributes(
+            id: String,
+            invoice_id: invoice.id,
+            amount_cents: 300,
+            precise_amount_cents: 300.0,
+            amount_currency: 'EUR',
+            units: 3,
+            events_count: nil,
+            payment_status: 'pending',
+            unit_amount_cents: 100,
+            precise_unit_amount: 1
+          )
+        end
+      end
+
+      context 'with adjusted amount' do
+        let(:adjusted_fee) do
+          create(
+            :adjusted_fee,
+            invoice:,
+            subscription:,
+            properties:,
+            adjusted_units: false,
+            adjusted_amount: true,
+            units: 3,
+            unit_amount_cents: 200,
+            unit_precise_amount_cents: 200.0
+          )
+        end
+
+        it 'creates a fee' do
+          result = fees_subscription_service.create
+
+          expect(result.fee).to have_attributes(
+            id: String,
+            invoice_id: invoice.id,
+            amount_cents: 600,
+            precise_amount_cents: 600.0,
+            amount_currency: 'EUR',
+            units: 3,
+            events_count: nil,
+            payment_status: 'pending',
+            unit_amount_cents: 200,
+            precise_unit_amount: 2
+          )
+        end
+
+        context 'when precise unit amounts are used' do
+          let(:adjusted_fee) do
+            create(
+              :adjusted_fee,
+              invoice:,
+              subscription:,
+              properties:,
+              adjusted_units: false,
+              adjusted_amount: true,
+              units: 1000,
+              unit_amount_cents: 0,
+              unit_precise_amount_cents: 0.1
+            )
+          end
+
+          it 'creates a fee' do
+            result = fees_subscription_service.create
+
+            expect(result.fee).to have_attributes(
+              id: String,
+              invoice_id: invoice.id,
+              amount_cents: 100,
+              precise_amount_cents: 100.0,
+              amount_currency: 'EUR',
+              units: 1000,
+              events_count: nil,
+              payment_status: 'pending',
+              unit_amount_cents: 0,
+              precise_unit_amount: 0.001
+            )
+          end
+        end
+      end
+
+      context 'with adjusted display name' do
+        let(:adjusted_fee) do
+          create(
+            :adjusted_fee,
+            invoice:,
+            subscription:,
+            properties:,
+            adjusted_units: false,
+            adjusted_amount: false,
+            units: 1,
+            invoice_display_name: 'test123'
+          )
+        end
+
+        it 'creates a fee' do
+          result = fees_subscription_service.create
+
+          expect(result.fee).to have_attributes(
+            id: String,
+            invoice_id: invoice.id,
+            amount_cents: 100,
+            precise_amount_cents: 100.0,
+            amount_currency: 'EUR',
+            units: 1,
+            events_count: nil,
+            payment_status: 'pending',
+            unit_amount_cents: 100,
+            precise_unit_amount: 1,
+            invoice_display_name: 'test123'
+          )
+        end
+      end
+
+      context 'with invoice NOT in draft status' do
+        before { invoice.finalized! }
+
+        it 'creates a fee without using adjusted fee attributes' do
+          result = fees_subscription_service.create
+
+          expect(result.fee).to have_attributes(
+            id: String,
+            invoice_id: invoice.id,
+            amount_cents: 100,
+            precise_amount_cents: 100.0,
+            amount_currency: 'EUR',
+            units: 1,
+            events_count: nil,
+            payment_status: 'pending',
+            unit_amount_cents: 100,
+            precise_unit_amount: 1
+          )
         end
       end
     end
@@ -99,7 +275,7 @@ RSpec.describe Fees::SubscriptionService do
       {
         from_datetime: subscription.started_at.beginning_of_day,
         to_datetime: subscription.started_at.end_of_month.end_of_day,
-        timestamp: (subscription.started_at.end_of_month + 1.day).to_i,
+        timestamp: (subscription.started_at.end_of_month + 1.day).to_i
       }
     end
 
@@ -108,7 +284,7 @@ RSpec.describe Fees::SubscriptionService do
         {
           from_datetime: subscription.started_at.to_date.beginning_of_day,
           to_datetime: subscription.started_at.end_of_week.end_of_day,
-          timestamp: (subscription.started_at.end_of_week + 1.day).to_i,
+          timestamp: (subscription.started_at.end_of_week + 1.day).to_i
         }
       end
 
@@ -121,17 +297,17 @@ RSpec.describe Fees::SubscriptionService do
 
         it 'creates a fee' do
           result = fees_subscription_service.create
-          created_fee = result.fee
 
-          aggregate_failures do
-            expect(created_fee.id).not_to be_nil
-            expect(created_fee.invoice_id).to eq(invoice.id)
-            expect(created_fee.amount_cents).to eq(plan.amount_cents)
-            expect(created_fee.amount_currency).to eq(plan.amount_currency)
-            expect(created_fee.vat_amount_cents).to eq(20)
-            expect(created_fee.vat_rate).to eq(20.0)
-            expect(created_fee.units).to eq(1)
-          end
+          expect(result.fee).to have_attributes(
+            id: String,
+            invoice_id: invoice.id,
+            amount_cents: 100,
+            precise_amount_cents: 100.0,
+            amount_currency: 'EUR',
+            unit_amount_cents: 100,
+            precise_unit_amount: 1,
+            units: 1
+          )
         end
 
         context 'when plan has a trial period' do
@@ -142,10 +318,12 @@ RSpec.describe Fees::SubscriptionService do
 
             it 'creates a fee with prorated amount based on trial' do
               result = fees_subscription_service.create
-              created_fee = result.fee
 
               # 100 - ((100/7)*3)
-              expect(created_fee.amount_cents).to eq(57)
+              expect(result.fee).to have_attributes(
+                amount_cents: 57,
+                precise_amount_cents: 57.14285714285714
+              )
             end
           end
 
@@ -155,7 +333,10 @@ RSpec.describe Fees::SubscriptionService do
             it 'creates a fee with zero amount' do
               result = fees_subscription_service.create
 
-              expect(result.fee.amount_cents).to eq(0)
+              expect(result.fee).to have_attributes(
+                amount_cents: 0,
+                precise_amount_cents: 0.0
+              )
             end
           end
         end
@@ -165,9 +346,11 @@ RSpec.describe Fees::SubscriptionService do
 
           it 'creates a fee' do
             result = fees_subscription_service.create
-            created_fee = result.fee
 
-            expect(created_fee.amount_cents).to eq(100)
+            expect(result.fee).to have_attributes(
+              amount_cents: 100,
+              precise_amount_cents: 100.0
+            )
           end
 
           context 'when plan has a trial period' do
@@ -178,9 +361,11 @@ RSpec.describe Fees::SubscriptionService do
 
               it 'creates a fee with prorated amount based on trial' do
                 result = fees_subscription_service.create
-                created_fee = result.fee
 
-                expect(created_fee.amount_cents).to eq(57)
+                expect(result.fee).to have_attributes(
+                  amount_cents: 57,
+                  precise_amount_cents: 57.14285714285714
+                )
               end
             end
 
@@ -189,9 +374,11 @@ RSpec.describe Fees::SubscriptionService do
 
               it 'creates a fee with zero amount' do
                 result = fees_subscription_service.create
-                created_fee = result.fee
 
-                expect(created_fee.amount_cents).to eq(0)
+                expect(result.fee).to have_attributes(
+                  amount_cents: 0,
+                  precise_amount_cents: 0.0
+                )
               end
             end
           end
@@ -203,17 +390,15 @@ RSpec.describe Fees::SubscriptionService do
 
         it 'creates a fee' do
           result = fees_subscription_service.create
-          created_fee = result.fee
 
-          aggregate_failures do
-            expect(created_fee.id).not_to be_nil
-            expect(created_fee.invoice_id).to eq(invoice.id)
-            expect(created_fee.amount_cents).to eq(71)
-            expect(created_fee.amount_currency).to eq(plan.amount_currency)
-            expect(created_fee.vat_amount_cents).to eq(14)
-            expect(created_fee.vat_rate).to eq(20.0)
-            expect(created_fee.units).to eq(1)
-          end
+          expect(result.fee).to have_attributes(
+            id: String,
+            invoice_id: invoice.id,
+            amount_cents: 71,
+            precise_amount_cents: 71.42857142857143,
+            amount_currency: plan.amount_currency,
+            units: 1
+          )
         end
 
         context 'when plan has a trial period' do
@@ -225,7 +410,10 @@ RSpec.describe Fees::SubscriptionService do
             it 'creates a fee with prorated amount based on trial' do
               result = fees_subscription_service.create
 
-              expect(result.fee.amount_cents).to eq(29)
+              expect(result.fee).to have_attributes(
+                amount_cents: 29,
+                precise_amount_cents: 28.57142857142857
+              )
             end
           end
 
@@ -235,7 +423,10 @@ RSpec.describe Fees::SubscriptionService do
             it 'creates a fee with zero amount' do
               result = fees_subscription_service.create
 
-              expect(result.fee.amount_cents).to eq(0)
+              expect(result.fee).to have_attributes(
+                amount_cents: 0,
+                precise_amount_cents: 0.0
+              )
             end
           end
         end
@@ -245,11 +436,11 @@ RSpec.describe Fees::SubscriptionService do
 
           it 'creates a fee' do
             result = fees_subscription_service.create
-            created_fee = result.fee
 
-            aggregate_failures do
-              expect(created_fee.amount_cents).to eq(71)
-            end
+            expect(result.fee).to have_attributes(
+              amount_cents: 71,
+              precise_amount_cents: 71.42857142857143
+            )
           end
 
           context 'when plan has a trial period' do
@@ -261,7 +452,10 @@ RSpec.describe Fees::SubscriptionService do
               it 'creates a fee with prorated amount based on trial' do
                 result = fees_subscription_service.create
 
-                expect(result.fee.amount_cents).to eq(29)
+                expect(result.fee).to have_attributes(
+                  amount_cents: 29,
+                  precise_amount_cents: 28.57142857142857
+                )
               end
             end
 
@@ -271,7 +465,10 @@ RSpec.describe Fees::SubscriptionService do
               it 'creates a fee with zero amount' do
                 result = fees_subscription_service.create
 
-                expect(result.fee.amount_cents).to eq(0)
+                expect(result.fee).to have_attributes(
+                  amount_cents: 0,
+                  precise_amount_cents: 0.0
+                )
               end
             end
           end
@@ -286,7 +483,10 @@ RSpec.describe Fees::SubscriptionService do
             it 'creates a full amount fee' do
               result = fees_subscription_service.create
 
-              expect(result.fee.amount_cents).to eq(plan.amount_cents)
+              expect(result.fee).to have_attributes(
+                amount_cents: result.fee.amount_cents,
+                precise_amount_cents: result.fee.amount_cents
+              )
             end
           end
 
@@ -297,14 +497,17 @@ RSpec.describe Fees::SubscriptionService do
               {
                 from_datetime: subscription.created_at.beginning_of_week.beginning_of_day,
                 to_datetime: subscription.created_at.end_of_week.end_of_day,
-                timestamp: (subscription.created_at.end_of_week + 1.day).to_i,
+                timestamp: (subscription.created_at.end_of_week + 1.day).to_i
               }
             end
 
             it 'creates a full amount fee' do
               result = fees_subscription_service.create
 
-              expect(result.fee.amount_cents).to eq(plan.amount_cents)
+              expect(result.fee).to have_attributes(
+                amount_cents: result.fee.amount_cents,
+                precise_amount_cents: result.fee.amount_cents
+              )
             end
           end
         end
@@ -319,17 +522,17 @@ RSpec.describe Fees::SubscriptionService do
 
         it 'creates a fee' do
           result = fees_subscription_service.create
-          created_fee = result.fee
 
-          aggregate_failures do
-            expect(created_fee.id).not_to be_nil
-            expect(created_fee.invoice_id).to eq(invoice.id)
-            expect(created_fee.amount_cents).to eq(plan.amount_cents)
-            expect(created_fee.amount_currency).to eq(plan.amount_currency)
-            expect(created_fee.vat_amount_cents).to eq(20)
-            expect(created_fee.vat_rate).to eq(20.0)
-            expect(created_fee.units).to eq(1)
-          end
+          expect(result.fee).to have_attributes(
+            id: String,
+            invoice_id: invoice.id,
+            amount_cents: 100,
+            precise_amount_cents: 100.0,
+            amount_currency: 'EUR',
+            unit_amount_cents: 100,
+            precise_unit_amount: 1,
+            units: 1
+          )
         end
 
         context 'when plan has a trial period' do
@@ -340,9 +543,11 @@ RSpec.describe Fees::SubscriptionService do
 
             it 'creates a fee with prorated amount based on trial' do
               result = fees_subscription_service.create
-              created_fee = result.fee
 
-              expect(created_fee.amount_cents).to eq(90)
+              expect(result.fee).to have_attributes(
+                amount_cents: 90,
+                precise_amount_cents: 90.32258064516128
+              )
             end
           end
 
@@ -352,7 +557,10 @@ RSpec.describe Fees::SubscriptionService do
             it 'creates a fee with zero amount' do
               result = fees_subscription_service.create
 
-              expect(result.fee.amount_cents).to eq(0)
+              expect(result.fee).to have_attributes(
+                amount_cents: 0,
+                precise_amount_cents: 0.0
+              )
             end
           end
         end
@@ -362,7 +570,7 @@ RSpec.describe Fees::SubscriptionService do
             {
               from_datetime: subscription.started_at.to_date.beginning_of_day,
               to_datetime: subscription.started_at.end_of_month.end_of_day,
-              timestamp: (subscription.started_at + 1.day).to_i,
+              timestamp: (subscription.started_at + 1.day).to_i
             }
           end
 
@@ -370,9 +578,11 @@ RSpec.describe Fees::SubscriptionService do
 
           it 'creates a fee' do
             result = fees_subscription_service.create
-            created_fee = result.fee
 
-            expect(created_fee.amount_cents).to eq(100)
+            expect(result.fee).to have_attributes(
+              amount_cents: 100,
+              precise_amount_cents: 100.0
+            )
           end
 
           context 'when plan has a trial period' do
@@ -383,9 +593,11 @@ RSpec.describe Fees::SubscriptionService do
 
               it 'creates a fee with prorated amount based on trial' do
                 result = fees_subscription_service.create
-                created_fee = result.fee
 
-                expect(created_fee.amount_cents).to eq(90)
+                expect(result.fee).to have_attributes(
+                  amount_cents: 90,
+                  precise_amount_cents: 90.32258064516128
+                )
               end
             end
 
@@ -394,9 +606,11 @@ RSpec.describe Fees::SubscriptionService do
 
               it 'creates a fee with zero amount' do
                 result = fees_subscription_service.create
-                created_fee = result.fee
 
-                expect(created_fee.amount_cents).to eq(0)
+                expect(result.fee).to have_attributes(
+                  amount_cents: 0,
+                  precise_amount_cents: 0.0
+                )
               end
             end
           end
@@ -408,17 +622,15 @@ RSpec.describe Fees::SubscriptionService do
 
         it 'creates a fee' do
           result = fees_subscription_service.create
-          created_fee = result.fee
 
-          aggregate_failures do
-            expect(created_fee.id).not_to be_nil
-            expect(created_fee.invoice_id).to eq(invoice.id)
-            expect(created_fee.amount_cents).to eq(55)
-            expect(created_fee.amount_currency).to eq(plan.amount_currency)
-            expect(created_fee.vat_amount_cents).to eq(11)
-            expect(created_fee.vat_rate).to eq(20.0)
-            expect(created_fee.units).to eq(1)
-          end
+          expect(result.fee).to have_attributes(
+            id: String,
+            invoice_id: invoice.id,
+            amount_cents: 55,
+            precise_amount_cents: 54.83870967741935,
+            amount_currency: plan.amount_currency,
+            units: 1
+          )
         end
 
         context 'when plan has a trial period' do
@@ -430,7 +642,10 @@ RSpec.describe Fees::SubscriptionService do
             it 'creates a fee with prorated amount based on trial' do
               result = fees_subscription_service.create
 
-              expect(result.fee.amount_cents).to eq(45)
+              expect(result.fee).to have_attributes(
+                amount_cents: 45,
+                precise_amount_cents: 45.16129032258064
+              )
             end
           end
 
@@ -440,7 +655,10 @@ RSpec.describe Fees::SubscriptionService do
             it 'creates a fee with zero amount' do
               result = fees_subscription_service.create
 
-              expect(result.fee.amount_cents).to eq(0)
+              expect(result.fee).to have_attributes(
+                amount_cents: 0,
+                precise_amount_cents: 0.0
+              )
             end
           end
         end
@@ -450,7 +668,7 @@ RSpec.describe Fees::SubscriptionService do
             {
               from_datetime: subscription.started_at.to_date.beginning_of_day,
               to_datetime: subscription.started_at.end_of_month.end_of_day,
-              timestamp: (subscription.started_at + 1.day).to_i,
+              timestamp: (subscription.started_at + 1.day).to_i
             }
           end
 
@@ -458,11 +676,11 @@ RSpec.describe Fees::SubscriptionService do
 
           it 'creates a fee' do
             result = fees_subscription_service.create
-            created_fee = result.fee
 
-            aggregate_failures do
-              expect(created_fee.amount_cents).to eq(55)
-            end
+            expect(result.fee).to have_attributes(
+              amount_cents: 55,
+              precise_amount_cents: 54.83870967741935
+            )
           end
 
           context 'when plan has a trial period' do
@@ -474,7 +692,10 @@ RSpec.describe Fees::SubscriptionService do
               it 'creates a fee with prorated amount based on trial' do
                 result = fees_subscription_service.create
 
-                expect(result.fee.amount_cents).to eq(45)
+                expect(result.fee).to have_attributes(
+                  amount_cents: 45,
+                  precise_amount_cents: 45.16129032258064
+                )
               end
             end
 
@@ -484,7 +705,10 @@ RSpec.describe Fees::SubscriptionService do
               it 'creates a fee with zero amount' do
                 result = fees_subscription_service.create
 
-                expect(result.fee.amount_cents).to eq(0)
+                expect(result.fee).to have_attributes(
+                  amount_cents: 0,
+                  precise_amount_cents: 0.0
+                )
               end
             end
           end
@@ -498,19 +722,19 @@ RSpec.describe Fees::SubscriptionService do
           create(
             :plan,
             amount_cents: 3000,
-            amount_currency: 'EUR',
+            amount_currency: 'EUR'
           )
         end
 
         let(:subscription) do
           create(
             :subscription,
-            plan: plan,
-            started_at: started_at,
+            plan:,
+            started_at:,
             subscription_at: DateTime.parse('2022-08-31'),
             billing_time: :anniversary,
-            customer: customer,
-            external_id: 'sub_id',
+            customer:,
+            external_id: 'sub_id'
           )
         end
 
@@ -518,7 +742,7 @@ RSpec.describe Fees::SubscriptionService do
           {
             from_datetime: Time.zone.parse('2022-08-31 00:00:00'),
             to_datetime: Time.zone.parse('2022-09-30 23:59:59'),
-            timestamp: Time.zone.parse('2022-04-02 00:00').end_of_month.to_i,
+            timestamp: Time.zone.parse('2022-10-01 00:00').to_i
           }
         end
 
@@ -531,7 +755,30 @@ RSpec.describe Fees::SubscriptionService do
             it 'creates a fee with prorated amount based on trial' do
               result = fees_subscription_service.create
 
-              expect(result.fee.amount_cents).to eq(1548)
+              expect(result.fee).to have_attributes(
+                amount_cents: 1600,
+                precise_amount_cents: 1600.0
+              )
+            end
+
+            context 'with customer timezone' do
+              let(:customer) { create(:customer, organization:, timezone: 'Europe/Paris') }
+              let(:boundaries) do
+                {
+                  from_datetime: Time.zone.parse('2022-08-30 22:00:00'),
+                  to_datetime: Time.zone.parse('2022-09-30 21:59:59'),
+                  timestamp: Time.zone.parse('2022-10-01 00:00').to_i
+                }
+              end
+
+              it 'creates a fee with prorated amount based on trial' do
+                result = fees_subscription_service.create
+
+                expect(result.fee).to have_attributes(
+                  amount_cents: 1600,
+                  precise_amount_cents: 1600.0
+                )
+              end
             end
           end
         end
@@ -548,34 +795,43 @@ RSpec.describe Fees::SubscriptionService do
           {
             from_datetime: subscription.started_at.beginning_of_year.beginning_of_day,
             to_datetime: subscription.started_at.end_of_year.end_of_day,
-            timestamp: (subscription.started_at.end_of_year + 1.day).to_i,
+            timestamp: (subscription.started_at.end_of_year + 1.day).to_i
           }
         end
 
         it 'creates a fee' do
           result = fees_subscription_service.create
-          created_fee = result.fee
 
-          aggregate_failures do
-            expect(created_fee.id).not_to be_nil
-            expect(created_fee.invoice_id).to eq(invoice.id)
-            expect(created_fee.amount_cents).to eq(plan.amount_cents)
-            expect(created_fee.amount_currency).to eq(plan.amount_currency)
-            expect(created_fee.vat_amount_cents).to eq(20)
-            expect(created_fee.vat_rate).to eq(20.0)
-          end
+          expect(result.fee).to have_attributes(
+            id: String,
+            invoice_id: invoice.id,
+            amount_cents: 100,
+            precise_amount_cents: 100,
+            amount_currency: 'EUR',
+            unit_amount_cents: 100,
+            precise_unit_amount: 1,
+            units: 1
+          )
         end
 
         context 'when plan is pay in advance' do
+          let(:boundaries) do
+            {
+              from_datetime: subscription.started_at.beginning_of_year.beginning_of_day,
+              to_datetime: subscription.started_at.end_of_year.end_of_day,
+              timestamp: subscription.started_at.beginning_of_year.beginning_of_day.to_i
+            }
+          end
+
           before { plan.update(pay_in_advance: true) }
 
           it 'creates a fee' do
             result = fees_subscription_service.create
-            created_fee = result.fee
 
-            aggregate_failures do
-              expect(created_fee.amount_cents).to eq(plan.amount_cents)
-            end
+            expect(result.fee).to have_attributes(
+              amount_cents: plan.amount_cents,
+              precise_amount_cents: plan.amount_cents
+            )
           end
         end
       end
@@ -587,22 +843,21 @@ RSpec.describe Fees::SubscriptionService do
           {
             from_datetime: subscription.started_at.beginning_of_day,
             to_datetime: subscription.started_at.end_of_year.end_of_day,
-            timestamp: (subscription.started_at.end_of_year + 1.day).to_i,
+            timestamp: (subscription.started_at.end_of_year + 1.day).to_i
           }
         end
 
         it 'creates a fee' do
           result = fees_subscription_service.create
-          created_fee = result.fee
 
-          aggregate_failures do
-            expect(created_fee.id).not_to be_nil
-            expect(created_fee.invoice_id).to eq(invoice.id)
-            expect(created_fee.amount_cents).to eq(80)
-            expect(created_fee.amount_currency).to eq(plan.amount_currency)
-            expect(created_fee.vat_amount_cents).to eq(16)
-            expect(created_fee.vat_rate).to eq(20.0)
-          end
+          expect(result.fee).to have_attributes(
+            id: String,
+            invoice_id: invoice.id,
+            amount_cents: 80,
+            precise_amount_cents: 80,
+            amount_currency: plan.amount_currency,
+            units: 1
+          )
         end
 
         context 'when plan is pay in advance' do
@@ -610,11 +865,11 @@ RSpec.describe Fees::SubscriptionService do
 
           it 'creates a fee' do
             result = fees_subscription_service.create
-            created_fee = result.fee
 
-            aggregate_failures do
-              expect(created_fee.amount_cents).to eq(80)
-            end
+            expect(result.fee).to have_attributes(
+              amount_cents: 80,
+              precise_amount_cents: 80.0
+            )
           end
         end
       end
@@ -628,14 +883,14 @@ RSpec.describe Fees::SubscriptionService do
       {
         from_datetime: subscription.started_at.beginning_of_day,
         to_datetime: subscription.started_at.end_of_month.end_of_day,
-        timestamp: (subscription.started_at.end_of_month + 1.day).to_i,
+        timestamp: (subscription.started_at.end_of_month + 1.day).to_i
       }
     end
 
     let(:invoice) do
       create(
         :invoice,
-        issuing_date: subscription.started_at.end_of_month.to_date + 1.day,
+        issuing_date: subscription.started_at.end_of_month.to_date + 1.day
       )
     end
 
@@ -646,11 +901,11 @@ RSpec.describe Fees::SubscriptionService do
 
     it 'creates a fee with full period amount' do
       result = fees_subscription_service.create
-      created_fee = result.fee
 
-      aggregate_failures do
-        expect(created_fee.amount_cents).to eq(100)
-      end
+      expect(result.fee).to have_attributes(
+        amount_cents: 100,
+        precise_amount_cents: 100.0
+      )
     end
 
     context 'when plan has trial period' do
@@ -660,15 +915,18 @@ RSpec.describe Fees::SubscriptionService do
         it 'creates a fee with prorated amount on trial period' do
           result = fees_subscription_service.create
 
-          expect(result.fee.amount_cents).to eq(90)
+          expect(result.fee).to have_attributes(
+            amount_cents: 90,
+            precise_amount_cents: 90.32258064516128
+          )
         end
 
         context 'when plan is pay in advance' do
           before do
             plan.update!(
               pay_in_advance: true,
-              trial_period: trial_period,
-              interval: interval,
+              trial_period:,
+              interval:
             )
           end
 
@@ -677,7 +935,7 @@ RSpec.describe Fees::SubscriptionService do
               {
                 from_datetime: subscription.started_at.to_date.end_of_week.beginning_of_day,
                 to_datetime: (subscription.started_at.end_of_week + 1.week).end_of_day,
-                timestamp: (subscription.started_at.end_of_week + 1.day).to_i,
+                timestamp: (subscription.started_at.end_of_week + 1.day).to_i
               }
             end
 
@@ -687,7 +945,10 @@ RSpec.describe Fees::SubscriptionService do
             it 'creates a fee with prorated amount on trial period' do
               result = fees_subscription_service.create
 
-              expect(result.fee.amount_cents).to eq(57)
+              expect(result.fee).to have_attributes(
+                amount_cents: 57,
+                precise_amount_cents: 57.14285714285714
+              )
             end
           end
 
@@ -699,14 +960,17 @@ RSpec.describe Fees::SubscriptionService do
               {
                 from_datetime: subscription.started_at.beginning_of_day,
                 to_datetime: subscription.started_at.end_of_month.end_of_day,
-                timestamp: (subscription.started_at + 1.day).to_i,
+                timestamp: (subscription.started_at + 1.day).to_i
               }
             end
 
             it 'creates a fee with prorated amount on trial period' do
               result = fees_subscription_service.create
 
-              expect(result.fee.amount_cents).to eq(52)
+              expect(result.fee).to have_attributes(
+                amount_cents: 52,
+                precise_amount_cents: 51.61290322580645
+              )
             end
           end
 
@@ -715,7 +979,7 @@ RSpec.describe Fees::SubscriptionService do
               {
                 from_datetime: subscription.started_at.beginning_of_year.beginning_of_day,
                 to_datetime: subscription.started_at.end_of_year.end_of_day,
-                timestamp: (subscription.started_at.beginning_of_year + 1.day).to_i,
+                timestamp: (subscription.started_at.beginning_of_year + 1.day).to_i
               }
             end
 
@@ -725,7 +989,10 @@ RSpec.describe Fees::SubscriptionService do
             it 'creates a fee with prorated amount on trial period' do
               result = fees_subscription_service.create
 
-              expect(result.fee.amount_cents).to eq(90)
+              expect(result.fee).to have_attributes(
+                amount_cents: 90,
+                precise_amount_cents: 90.41095890410958
+              )
             end
           end
         end
@@ -737,7 +1004,10 @@ RSpec.describe Fees::SubscriptionService do
         it 'creates a fee with 0 amount' do
           result = fees_subscription_service.create
 
-          expect(result.fee.amount_cents).to eq(0)
+          expect(result.fee).to have_attributes(
+            amount_cents: 0,
+            precise_amount_cents: 0.0
+          )
         end
       end
     end
@@ -748,7 +1018,7 @@ RSpec.describe Fees::SubscriptionService do
       create(
         :plan,
         amount_cents: 100,
-        amount_currency: 'EUR',
+        amount_currency: 'EUR'
       )
     end
 
@@ -758,12 +1028,12 @@ RSpec.describe Fees::SubscriptionService do
       {
         from_datetime: (subscription.started_at + 1.month).beginning_of_day,
         to_datetime: (subscription.started_at + 2.months).end_of_day,
-        timestamp: (subscription.started_at + 2.months + 1.day).to_i,
+        timestamp: (subscription.started_at + 2.months + 1.day).to_i
       }
     end
 
     before do
-      create(:fee, subscription: subscription, invoice: invoice)
+      create(:fee, subscription:, invoice:)
     end
 
     it 'does not create a fee' do
@@ -777,12 +1047,12 @@ RSpec.describe Fees::SubscriptionService do
     let(:subscription) do
       create(
         :subscription,
-        plan: plan,
+        plan:,
         status: :terminated,
-        started_at: started_at,
-        subscription_at: subscription_at,
-        customer: customer,
-        external_id: 'sub_id',
+        started_at:,
+        subscription_at:,
+        customer:,
+        external_id: 'sub_id'
       )
     end
 
@@ -790,7 +1060,7 @@ RSpec.describe Fees::SubscriptionService do
       {
         from_datetime: subscription.started_at.beginning_of_month.beginning_of_day,
         to_datetime: (subscription.started_at + 5.days).end_of_day,
-        timestamp: (subscription.started_at + 6.days).to_i,
+        timestamp: (subscription.started_at + 6.days).to_i
       }
     end
 
@@ -800,15 +1070,44 @@ RSpec.describe Fees::SubscriptionService do
 
     it 'creates a fee' do
       result = fees_subscription_service.create
-      created_fee = result.fee
 
-      aggregate_failures do
-        expect(created_fee.id).not_to be_nil
-        expect(created_fee.invoice_id).to eq(invoice.id)
-        expect(created_fee.amount_cents).to eq(65)
-        expect(created_fee.amount_currency).to eq(plan.amount_currency)
-        expect(created_fee.vat_amount_cents).to eq(13)
-        expect(created_fee.vat_rate).to eq(20.0)
+      expect(result.fee).to have_attributes(
+        id: String,
+        invoice_id: invoice.id,
+        amount_cents: 65,
+        precise_amount_cents: 64.51612903225806,
+        amount_currency: plan.amount_currency,
+        units: 1
+      )
+    end
+
+    context 'with customer timezone' do
+      let(:customer) { create(:customer, organization:, timezone: 'Europe/Paris') }
+      let(:from_datetime) do
+        subscription.started_at.to_date.beginning_of_month.in_time_zone(customer.applicable_timezone).utc
+      end
+      let(:to_datetime) do
+        (subscription.started_at + 5.days).to_date.in_time_zone(customer.applicable_timezone).end_of_day.utc
+      end
+      let(:boundaries) do
+        {
+          from_datetime:,
+          to_datetime:,
+          timestamp: (subscription.started_at + 6.days).to_i
+        }
+      end
+
+      it 'creates a fee' do
+        result = fees_subscription_service.create
+
+        expect(result.fee).to have_attributes(
+          id: String,
+          invoice_id: invoice.id,
+          amount_cents: 65,
+          precise_amount_cents: 64.51612903225806,
+          amount_currency: plan.amount_currency,
+          units: 1
+        )
       end
     end
 
@@ -817,7 +1116,7 @@ RSpec.describe Fees::SubscriptionService do
         {
           from_datetime: subscription.started_at.beginning_of_week.beginning_of_day,
           to_datetime: (subscription.started_at + 1.day).end_of_day,
-          timestamp: (subscription.started_at + 2.days).to_i,
+          timestamp: (subscription.started_at + 2.days).to_i
         }
       end
 
@@ -827,16 +1126,15 @@ RSpec.describe Fees::SubscriptionService do
 
       it 'creates a fee' do
         result = fees_subscription_service.create
-        created_fee = result.fee
 
-        aggregate_failures do
-          expect(created_fee.id).not_to be_nil
-          expect(created_fee.invoice_id).to eq(invoice.id)
-          expect(created_fee.amount_cents).to eq(43)
-          expect(created_fee.amount_currency).to eq(plan.amount_currency)
-          expect(created_fee.vat_amount_cents).to eq(9)
-          expect(created_fee.vat_rate).to eq(20.0)
-        end
+        expect(result.fee).to have_attributes(
+          id: String,
+          invoice_id: invoice.id,
+          amount_cents: 43,
+          precise_amount_cents: 42.85714285714286,
+          amount_currency: plan.amount_currency,
+          units: 1
+        )
       end
     end
 
@@ -847,16 +1145,15 @@ RSpec.describe Fees::SubscriptionService do
 
       it 'creates a fee' do
         result = fees_subscription_service.create
-        created_fee = result.fee
 
-        aggregate_failures do
-          expect(created_fee.id).not_to be_nil
-          expect(created_fee.invoice_id).to eq(invoice.id)
-          expect(created_fee.amount_cents).to eq(65)
-          expect(created_fee.amount_currency).to eq(plan.amount_currency)
-          expect(created_fee.vat_amount_cents).to eq(13)
-          expect(created_fee.vat_rate).to eq(20.0)
-        end
+        expect(result.fee).to have_attributes(
+          id: String,
+          invoice_id: invoice.id,
+          amount_cents: 61, # 100/31 * 19
+          precise_amount_cents: 61.29032258064516, # 100/31 * 19
+          amount_currency: plan.amount_currency,
+          units: 1
+        )
       end
     end
 
@@ -872,7 +1169,10 @@ RSpec.describe Fees::SubscriptionService do
         it 'creates a fee with prorated amount based on trial period' do
           result = fees_subscription_service.create
 
-          expect(result.fee.amount_cents).to eq(10)
+          expect(result.fee).to have_attributes(
+            amount_cents: 6, # 2 days * (100 / 31)
+            precise_amount_cents: 6.451612903225806 # 2 days * (100 / 31)
+          )
         end
       end
 
@@ -882,7 +1182,10 @@ RSpec.describe Fees::SubscriptionService do
         it 'creates a fee with zero amount' do
           result = fees_subscription_service.create
 
-          expect(result.fee.amount_cents).to eq(0)
+          expect(result.fee).to have_attributes(
+            amount_cents: 0,
+            precise_amount_cents: 0.0
+          )
         end
       end
     end
@@ -896,8 +1199,8 @@ RSpec.describe Fees::SubscriptionService do
         status: :terminated,
         plan: previous_plan,
         started_at: started_at - 6.months,
-        customer: customer,
-        external_id: 'sub_id',
+        customer:,
+        external_id: 'sub_id'
       )
     end
     let(:started_at) { Time.zone.parse('2022-03-15 00:00:00') }
@@ -905,12 +1208,12 @@ RSpec.describe Fees::SubscriptionService do
     let(:subscription) do
       create(
         :subscription,
-        plan: plan,
-        started_at: started_at,
-        subscription_at: subscription_at,
-        previous_subscription: previous_subscription,
-        customer: customer,
-        external_id: 'sub_id',
+        plan:,
+        started_at:,
+        subscription_at:,
+        previous_subscription:,
+        customer:,
+        external_id: 'sub_id'
       )
     end
 
@@ -918,7 +1221,7 @@ RSpec.describe Fees::SubscriptionService do
       {
         from_datetime: subscription.started_at.beginning_of_day,
         to_datetime: subscription.started_at.end_of_month.end_of_day,
-        timestamp: (subscription.started_at.end_of_month + 1.day).to_i,
+        timestamp: (subscription.started_at.end_of_month + 1.day).to_i
       }
     end
 
@@ -926,15 +1229,44 @@ RSpec.describe Fees::SubscriptionService do
 
     it 'creates a subscription fee' do
       result = fees_subscription_service.create
-      created_fee = result.fee
 
-      aggregate_failures do
-        expect(created_fee.id).not_to be_nil
-        expect(created_fee.invoice_id).to eq(invoice.id)
-        expect(created_fee.amount_cents).to eq(55)
-        expect(created_fee.amount_currency).to eq(plan.amount_currency)
-        expect(created_fee.vat_amount_cents).to eq(11)
-        expect(created_fee.vat_rate).to eq(20.0)
+      expect(result.fee).to have_attributes(
+        id: String,
+        invoice_id: invoice.id,
+        amount_cents: 55,
+        precise_amount_cents: 54.83870967741935,
+        amount_currency: plan.amount_currency,
+        units: 1
+      )
+    end
+
+    context 'with customer timezone' do
+      let(:customer) { create(:customer, organization:, timezone: 'Europe/Paris') }
+      let(:from_datetime) do
+        subscription.started_at.in_time_zone(customer.applicable_timezone).beginning_of_day.utc
+      end
+      let(:to_datetime) do
+        subscription.started_at.end_of_month.to_date.in_time_zone(customer.applicable_timezone).end_of_day.utc
+      end
+      let(:boundaries) do
+        {
+          from_datetime:,
+          to_datetime:,
+          timestamp: (subscription.started_at + 17.days).to_i
+        }
+      end
+
+      it 'creates a subscription fee' do
+        result = fees_subscription_service.create
+
+        expect(result.fee).to have_attributes(
+          id: String,
+          invoice_id: invoice.id,
+          amount_cents: 55,
+          precise_amount_cents: 54.83870967741935,
+          amount_currency: plan.amount_currency,
+          units: 1
+        )
       end
     end
 
@@ -947,7 +1279,10 @@ RSpec.describe Fees::SubscriptionService do
         it 'creates a fee with prorated amount based on the trial' do
           result = fees_subscription_service.create
 
-          expect(result.fee.amount_cents).to eq(45)
+          expect(result.fee).to have_attributes(
+            amount_cents: 45,
+            precise_amount_cents: 45.16129032258064
+          )
         end
       end
 
@@ -959,7 +1294,10 @@ RSpec.describe Fees::SubscriptionService do
         it 'creates a fee with zero amount' do
           result = fees_subscription_service.create
 
-          expect(result.fee.amount_cents).to eq(0)
+          expect(result.fee).to have_attributes(
+            amount_cents: 0,
+            precise_amount_cents: 0.0
+          )
         end
       end
     end
@@ -974,14 +1312,17 @@ RSpec.describe Fees::SubscriptionService do
         {
           from_datetime: subscription.started_at,
           to_datetime: subscription.started_at.end_of_month,
-          timestamp: subscription.started_at.to_i,
+          timestamp: subscription.started_at.to_i
         }
       end
 
       it 'creates a subscription fee' do
         result = fees_subscription_service.create
 
-        expect(result.fee.amount_cents).to eq(55)
+        expect(result.fee).to have_attributes(
+          amount_cents: 55,
+          precise_amount_cents: 54.83870967741935
+        )
       end
     end
   end

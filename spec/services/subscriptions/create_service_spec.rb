@@ -25,7 +25,7 @@ RSpec.describe Subscriptions::CreateService, type: :service do
       external_id:,
       billing_time:,
       subscription_at:,
-      subscription_id:,
+      subscription_id:
     }
   end
 
@@ -49,6 +49,9 @@ RSpec.describe Subscriptions::CreateService, type: :service do
         expect(subscription).to be_active
         expect(subscription.external_id).to eq(external_id)
         expect(subscription).to be_anniversary
+        expect(subscription.lifetime_usage).to be_present
+        expect(subscription.lifetime_usage.recalculate_invoiced_usage).to eq(false)
+        expect(subscription.lifetime_usage.recalculate_current_usage).to eq(false)
       end
     end
 
@@ -65,9 +68,77 @@ RSpec.describe Subscriptions::CreateService, type: :service do
           plan_name: subscription.plan.name,
           subscription_type: 'create',
           organization_id: subscription.organization.id,
-          billing_time: 'anniversary',
-        },
+          billing_time: 'anniversary'
+        }
       )
+    end
+
+    context 'when subscription should sync with Hubspot' do
+      let(:customer) { create(:customer, :with_hubspot_integration, organization:, currency: 'EUR') }
+
+      before do
+        allow(Integrations::Aggregator::Subscriptions::Hubspot::CreateJob).to receive(:perform_later)
+      end
+
+      it 'enqueues the Hubspot create job for a new subscription' do
+        create_service.call
+        expect(Integrations::Aggregator::Subscriptions::Hubspot::CreateJob).to have_received(:perform_later)
+      end
+    end
+
+    context 'when ending_at is passed' do
+      let(:params) do
+        {
+          external_customer_id:,
+          plan_code:,
+          name:,
+          external_id:,
+          billing_time:,
+          subscription_at:,
+          subscription_id:,
+          ending_at: Time.current.beginning_of_day + 3.months
+        }
+      end
+
+      it 'creates a subscription with ending_at correctly set' do
+        result = create_service.call
+
+        aggregate_failures do
+          expect(result).to be_success
+
+          subscription = result.subscription
+          expect(subscription.ending_at).to eq(Time.current.beginning_of_day + 3.months)
+        end
+      end
+    end
+
+    context 'when customer is invalid in an api context' do
+      let(:customer) do
+        build(:customer, organization:, currency: 'EUR', external_id: nil)
+      end
+
+      let(:params) do
+        {
+          plan_code:,
+          name:,
+          external_id:,
+          billing_time:,
+          subscription_at:,
+          subscription_id:
+        }
+      end
+
+      before { CurrentContext.source = 'api' }
+
+      it 'returns an error' do
+        result = create_service.call
+
+        aggregate_failures do
+          expect(result).not_to be_success
+          expect(result.error).to be_a(BaseService::ValidationFailure)
+          expect(result.error.messages[:external_customer_id]).to eq(['value_is_mandatory'])
+        end
+      end
     end
 
     context 'when external_id is not given in an api context' do
@@ -96,6 +167,44 @@ RSpec.describe Subscriptions::CreateService, type: :service do
           expect(result).to be_success
           expect(result.subscription).to be_calendar
         end
+      end
+
+      context 'when billing time is empty' do
+        let(:billing_time) { '' }
+
+        it 'creates a calendar subscription' do
+          result = create_service.call
+
+          aggregate_failures do
+            expect(result).not_to be_success
+            expect(result.error).to be_a(BaseService::ValidationFailure)
+            expect(result.error.messages[:billing_time]).to eq(['value_is_mandatory'])
+          end
+        end
+      end
+    end
+
+    context 'when License is free and plan_overrides is passed' do
+      let(:params) do
+        {
+          external_customer_id:,
+          plan_code:,
+          name:,
+          external_id:,
+          billing_time:,
+          subscription_at:,
+          subscription_id:,
+          plan_overrides: {
+            amount_cents: 0
+          }
+        }
+      end
+
+      it 'returns an error' do
+        result = create_service.call
+
+        expect(result).not_to be_success
+        expect(result.error.code).to eq('feature_unavailable')
       end
     end
 
@@ -137,10 +246,19 @@ RSpec.describe Subscriptions::CreateService, type: :service do
       end
     end
 
+    context 'when plan is pay_in_advance but subscription is not active' do
+      let(:plan) { create(:plan, amount_cents: 100, organization:, pay_in_advance: true) }
+      let(:subscription_at) { Time.current + 1.hour }
+
+      it 'does not enqueue a job to bill the subscription' do
+        expect { create_service.call }.not_to have_enqueued_job(BillSubscriptionJob)
+      end
+    end
+
     context 'when plan is pay_in_advance and subscription_at is current date' do
       let(:plan) { create(:plan, amount_cents: 100, organization:, pay_in_advance: true) }
 
-      it 'enqueued a job to bill the subscription' do
+      it 'enqueues a job to bill the subscription' do
         expect { create_service.call }.to have_enqueued_job(BillSubscriptionJob)
       end
     end
@@ -149,7 +267,15 @@ RSpec.describe Subscriptions::CreateService, type: :service do
       let(:plan) { create(:plan, amount_cents: 100, organization:, pay_in_advance: true) }
       let(:subscription_at) { Time.current + 5.days }
 
-      it 'did not enqueue a job to bill the subscription' do
+      it 'does not enqueue a job to bill the subscription' do
+        expect { create_service.call }.not_to have_enqueued_job(BillSubscriptionJob)
+      end
+    end
+
+    context 'when plan is pay_in_advance and subscription_at is current date but there is a trial period' do
+      let(:plan) { create(:plan, amount_cents: 100, organization:, pay_in_advance: true, trial_period: 10) }
+
+      it 'does not enqueue a job to bill the subscription' do
         expect { create_service.call }.not_to have_enqueued_job(BillSubscriptionJob)
       end
     end
@@ -216,6 +342,7 @@ RSpec.describe Subscriptions::CreateService, type: :service do
           expect(subscription).to be_pending
           expect(subscription.external_id).to eq(external_id)
           expect(subscription).to be_anniversary
+          expect(subscription.lifetime_usage).not_to be_present
         end
       end
     end
@@ -238,6 +365,9 @@ RSpec.describe Subscriptions::CreateService, type: :service do
           expect(subscription).to be_active
           expect(subscription.external_id).to eq(external_id)
           expect(subscription).to be_anniversary
+          expect(subscription.lifetime_usage).to be_present
+          expect(subscription.lifetime_usage.recalculate_invoiced_usage).to eq(false)
+          expect(subscription.lifetime_usage.recalculate_current_usage).to eq(false)
         end
       end
     end
@@ -265,7 +395,7 @@ RSpec.describe Subscriptions::CreateService, type: :service do
           status: :active,
           subscription_at: Time.current,
           started_at: Time.current,
-          external_id:,
+          external_id:
         )
       end
 
@@ -317,16 +447,37 @@ RSpec.describe Subscriptions::CreateService, type: :service do
         end
       end
 
-      # =========================>
       context 'when plan is not the same' do
         context 'when we upgrade the plan' do
+          let(:customer) { create(:customer, :with_hubspot_integration, organization:, currency: 'EUR') }
           let(:plan) { create(:plan, amount_cents: 200, organization:) }
           let(:old_plan) { create(:plan, amount_cents: 100, organization:) }
           let(:name) { 'invoice display name new' }
 
+          before do
+            subscription.mark_as_active!
+          end
+
           it 'terminates the existing subscription' do
-            expect { create_service.call }.to have_enqueued_job(BillSubscriptionJob)
-            expect(subscription.reload).to be_terminated
+            expect { create_service.call }.to change { subscription.reload.status }.from('active').to('terminated')
+          end
+
+          it 'moves the lifetime_usage to the new subscription' do
+            lifetime_usage = subscription.lifetime_usage
+            result = create_service.call
+            expect(result.subscription.lifetime_usage).to eq(lifetime_usage.reload)
+            expect(subscription.reload.lifetime_usage).to be_nil
+          end
+
+          it 'sends terminated and started subscription webhooks', :aggregate_failures do
+            result = create_service.call
+            expect(SendWebhookJob).to have_been_enqueued.with('subscription.terminated', subscription)
+            expect(SendWebhookJob).to have_been_enqueued.with('subscription.started', result.subscription)
+          end
+
+          it 'enqueues the Hubspot update job', :aggregate_failures do
+            create_service.call
+            expect(Integrations::Aggregator::Subscriptions::Hubspot::UpdateJob).to have_been_enqueued.with(subscription:)
           end
 
           it 'creates a new subscription' do
@@ -340,6 +491,28 @@ RSpec.describe Subscriptions::CreateService, type: :service do
               expect(result.subscription.plan.id).to eq(plan.id)
               expect(result.subscription.previous_subscription_id).to eq(subscription.id)
               expect(result.subscription.subscription_at).to eq(subscription.subscription_at)
+            end
+          end
+
+          context "when subscription upgrade fails" do
+            let(:result_failure) do
+              BaseService::Result.new.validation_failure!(
+                errors: {billing_time: ['value_is_invalid']}
+              )
+            end
+
+            before do
+              allow(Subscriptions::PlanUpgradeService)
+                .to receive(:call)
+                .and_return(result_failure)
+            end
+
+            it "returns an error", :aggregate_failures do
+              result = create_service.call
+
+              expect(result).not_to be_success
+              expect(result.error).to be_a(BaseService::ValidationFailure)
+              expect(result.error.messages).to eq({billing_time: ["value_is_invalid"]})
             end
           end
 
@@ -367,16 +540,35 @@ RSpec.describe Subscriptions::CreateService, type: :service do
           end
 
           context 'when old subscription was payed in advance' do
+            let(:creation_time) { Time.current.beginning_of_month - 1.month }
+            let(:date_service) do
+              Subscriptions::DatesService.new_instance(
+                subscription,
+                Time.current.beginning_of_month,
+                current_usage: false
+              )
+            end
+            let(:invoice_subscription) do
+              create(
+                :invoice_subscription,
+                invoice:,
+                subscription:,
+                recurring: true,
+                from_datetime: date_service.from_datetime,
+                to_datetime: date_service.to_datetime,
+                charges_from_datetime: date_service.charges_from_datetime,
+                charges_to_datetime: date_service.charges_to_datetime
+              )
+            end
             let(:invoice) do
               create(
                 :invoice,
                 customer:,
-                amount_currency: 'EUR',
-                amount_cents: 100,
-                vat_amount_currency: 'EUR',
-                vat_amount_cents: 20,
-                total_amount_currency: 'EUR',
-                total_amount_cents: 120,
+                currency: 'EUR',
+                sub_total_excluding_taxes_amount_cents: 100,
+                fees_amount_cents: 100,
+                taxes_amount_cents: 20,
+                total_amount_cents: 120
               )
             end
 
@@ -386,10 +578,10 @@ RSpec.describe Subscriptions::CreateService, type: :service do
                 subscription:,
                 invoice:,
                 amount_cents: 100,
-                vat_amount_cents: 20,
+                taxes_amount_cents: 20,
                 invoiceable_type: 'Subscription',
                 invoiceable_id: subscription.id,
-                vat_rate: 20,
+                taxes_rate: 20
               )
             end
 
@@ -399,16 +591,19 @@ RSpec.describe Subscriptions::CreateService, type: :service do
                 customer:,
                 plan: old_plan,
                 status: :active,
-                subscription_at: Time.current - 40.days,
-                started_at: Time.current - 40.days,
+                subscription_at: creation_time,
+                started_at: creation_time,
                 external_id:,
-                billing_time: 'anniversary',
+                billing_time: 'anniversary'
               )
             end
 
             let(:old_plan) { create(:plan, amount_cents: 100, organization:, pay_in_advance: true) }
 
-            before { last_subscription_fee }
+            before do
+              invoice_subscription
+              last_subscription_fee
+            end
 
             it 'creates a credit note for the remaining days' do
               expect { create_service.call }.to change(CreditNote, :count)
@@ -419,7 +614,7 @@ RSpec.describe Subscriptions::CreateService, type: :service do
             let(:plan) { create(:plan, amount_cents: 200, organization:, pay_in_advance: true) }
 
             it 'enqueues a job to bill the existing subscription' do
-              expect { create_service.call }.to have_enqueued_job(BillSubscriptionJob).twice
+              expect { create_service.call }.to have_enqueued_job(BillSubscriptionJob)
             end
           end
 
@@ -429,7 +624,7 @@ RSpec.describe Subscriptions::CreateService, type: :service do
                 :subscription,
                 status: :pending,
                 previous_subscription: subscription,
-                organization: subscription.organization,
+                organization: subscription.organization
               )
             end
 
@@ -447,6 +642,10 @@ RSpec.describe Subscriptions::CreateService, type: :service do
         end
 
         context 'when we downgrade the plan' do
+          before do
+            subscription.mark_as_active!
+          end
+
           let(:plan) { create(:plan, amount_cents: 50, organization:) }
           let(:old_plan) { create(:plan, amount_cents: 100, organization:) }
           let(:name) { 'invoice display name new' }
@@ -464,6 +663,8 @@ RSpec.describe Subscriptions::CreateService, type: :service do
               expect(next_subscription.plan_id).to eq(plan.id)
               expect(next_subscription.subscription_at).to eq(subscription.subscription_at)
               expect(next_subscription.previous_subscription).to eq(subscription)
+              expect(next_subscription.ending_at).to eq(subscription.ending_at)
+              expect(next_subscription.lifetime_usage).to be_nil
             end
           end
 
@@ -474,6 +675,33 @@ RSpec.describe Subscriptions::CreateService, type: :service do
               expect(result.subscription.id).to eq(subscription.id)
               expect(result.subscription).to be_active
               expect(result.subscription.next_subscription).to be_present
+              expect(result.subscription.lifetime_usage).to be_present
+            end
+          end
+
+          context 'when ending_at is overridden' do
+            let(:params) do
+              {
+                external_customer_id:,
+                plan_code:,
+                name:,
+                external_id:,
+                billing_time:,
+                subscription_at:,
+                subscription_id:,
+                ending_at: Time.current.beginning_of_day + 3.months
+              }
+            end
+
+            it 'creates a new subscription with correctly set ending_at' do
+              result = create_service.call
+
+              aggregate_failures do
+                expect(result).to be_success
+
+                next_subscription = result.subscription.next_subscription
+                expect(next_subscription.ending_at).to eq(Time.current.beginning_of_day + 3.months)
+              end
             end
           end
 
@@ -498,7 +726,7 @@ RSpec.describe Subscriptions::CreateService, type: :service do
                 :subscription,
                 status: :pending,
                 previous_subscription: subscription,
-                organization: subscription.organization,
+                organization: subscription.organization
               )
             end
 

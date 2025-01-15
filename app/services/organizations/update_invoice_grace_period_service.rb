@@ -4,39 +4,48 @@ module Organizations
   class UpdateInvoiceGracePeriodService < BaseService
     def initialize(organization:, grace_period:)
       @organization = organization
-      @grace_period = grace_period
+      @grace_period = grace_period.to_i
       super
     end
 
     def call
-      ActiveRecord::Base.transaction do
-        organization.update!(invoice_grace_period: grace_period)
+      old_grace_period = organization.invoice_grace_period.to_i
 
-        # NOTE: Finalize related draft invoices.
-        organization.invoices.ready_to_be_finalized.each do |invoice|
-          Invoices::FinalizeService.call(invoice:)
-        end
+      if grace_period != old_grace_period
+        organization.invoice_grace_period = grace_period
+        organization.save!
 
         # NOTE: Update issuing_date on draft invoices.
-        organization.invoices.draft.each do |invoice|
-          invoice.update!(issuing_date: grace_period_issuing_date(invoice))
+        organization.invoices.draft.find_each do |invoice|
+          grace_period_diff = invoice.customer.applicable_invoice_grace_period.to_i -
+            old_applicable_grace_period(invoice.customer, old_grace_period)
+
+          invoice.issuing_date = invoice.issuing_date + grace_period_diff.days
+          invoice.payment_due_date = grace_period_payment_due_date(invoice)
+          invoice.save!
         end
 
-        result.organization = organization
-        result
+        organization.invoices.ready_to_be_finalized.find_each do |invoice|
+          Invoices::FinalizeJob.perform_later(invoice)
+        end
       end
+
+      result.organization = organization
+      result
     end
 
     private
 
     attr_reader :organization, :grace_period
 
-    def invoice_created_at(invoice)
-      invoice.created_at.in_time_zone(invoice.customer.applicable_timezone).to_date
+    def grace_period_payment_due_date(invoice)
+      invoice.issuing_date + invoice.customer.applicable_net_payment_term.days
     end
 
-    def grace_period_issuing_date(invoice)
-      invoice_created_at(invoice) + invoice.customer.applicable_invoice_grace_period.days
+    def old_applicable_grace_period(customer, old_org_grace_period)
+      return customer.invoice_grace_period if customer.invoice_grace_period.present?
+
+      old_org_grace_period
     end
   end
 end

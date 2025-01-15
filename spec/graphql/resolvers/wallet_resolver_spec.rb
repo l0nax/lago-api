@@ -5,9 +5,9 @@ require 'rails_helper'
 RSpec.describe Resolvers::WalletResolver, type: :graphql do
   let(:query) do
     <<~GQL
-      query($walletId: ID!) {
-        wallet(id: $walletId) {
-          id name expirationAt
+      query($id: ID!) {
+        wallet(id: $id) {
+          id name status creditsBalance
         }
       }
     GQL
@@ -15,26 +15,26 @@ RSpec.describe Resolvers::WalletResolver, type: :graphql do
 
   let(:membership) { create(:membership) }
   let(:organization) { membership.organization }
-  let(:customer) { create(:customer, organization: organization) }
-  let(:subscription) { create(:subscription, status: :active, customer: customer, organization: organization) }
-  let(:wallet) { create(:wallet, customer: customer) }
+  let(:customer) { create(:customer, organization:) }
+  let(:wallet) { create(:wallet, customer:) }
 
-  before { subscription }
+  before { wallet }
 
-  it 'returns a single wallet' do
+  it 'returns a wallet' do
     result = execute_graphql(
       current_user: membership.user,
       current_organization: organization,
-      query: query,
-      variables: {
-        walletId: wallet.id,
-      },
+      query:,
+      variables: {id: wallet.id}
     )
 
-    wallet_response = result['data']['wallet']
+    coupon_response = result['data']['wallet']
 
     aggregate_failures do
-      expect(wallet_response['id']).to eq(wallet.id)
+      expect(coupon_response['id']).to eq(wallet.id)
+      expect(coupon_response['name']).to eq(wallet.name)
+      expect(coupon_response['status']).to eq('active')
+      expect(coupon_response['creditsBalance']).to eq(0)
     end
   end
 
@@ -42,16 +42,11 @@ RSpec.describe Resolvers::WalletResolver, type: :graphql do
     it 'returns an error' do
       result = execute_graphql(
         current_user: membership.user,
-        query: query,
-        variables: {
-          walletId: wallet.id,
-        },
+        query:,
+        variables: {id: wallet.id}
       )
 
-      expect_graphql_error(
-        result: result,
-        message: 'Missing organization id',
-      )
+      expect_graphql_error(result:, message: 'Missing organization id')
     end
   end
 
@@ -60,16 +55,11 @@ RSpec.describe Resolvers::WalletResolver, type: :graphql do
       result = execute_graphql(
         current_user: membership.user,
         current_organization: organization,
-        query: query,
-        variables: {
-          walletId: 'foo',
-        },
+        query:,
+        variables: {id: 'foo'}
       )
 
-      expect_graphql_error(
-        result: result,
-        message: 'Resource not found',
-      )
+      expect_graphql_error(result:, message: 'Resource not found')
     end
   end
 end

@@ -8,7 +8,7 @@ RSpec.describe Customers::TerminateRelationsService, type: :service do
   let(:customer) { create(:customer, :deleted) }
 
   context 'with an active subscription' do
-    let(:subscription) { create(:active_subscription, customer:) }
+    let(:subscription) { create(:subscription, customer:) }
 
     before { subscription }
 
@@ -22,7 +22,7 @@ RSpec.describe Customers::TerminateRelationsService, type: :service do
   end
 
   context 'with a pending subscription' do
-    let(:subscription) { create(:pending_subscription, customer:) }
+    let(:subscription) { create(:subscription, :pending, customer:) }
 
     before { subscription }
 
@@ -36,13 +36,12 @@ RSpec.describe Customers::TerminateRelationsService, type: :service do
   end
 
   context 'with draft invoices' do
-    let(:subscription) { create(:active_subscription, customer:) }
+    let(:subscription) { create(:subscription, customer:) }
     let(:invoices) { create_list(:invoice, 2, :draft, customer:) }
 
     before do
-      invoices.each do |invoice|
-        create(:invoice_subscription, invoice:, subscription:)
-      end
+      create(:invoice_subscription, invoice: invoices.first, subscription:, invoicing_reason: :subscription_starting)
+      create(:invoice_subscription, invoice: invoices.last, subscription:, invoicing_reason: :subscription_periodic)
     end
 
     it 'finalizes draft invoices' do

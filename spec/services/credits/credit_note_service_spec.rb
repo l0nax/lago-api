@@ -3,21 +3,14 @@
 require 'rails_helper'
 
 RSpec.describe Credits::CreditNoteService do
-  subject(:credit_service) do
-    described_class.new(
-      invoice: invoice,
-      credit_notes: [credit_note1, credit_note2],
-    )
-  end
+  subject(:credit_service) { described_class.new(invoice:) }
 
   let(:invoice) do
     create(
       :invoice,
-      customer: customer,
-      amount_cents: amount_cents,
-      amount_currency: 'EUR',
-      total_amount_cents: amount_cents,
-      total_amount_currency: 'EUR',
+      customer:,
+      currency: 'EUR',
+      total_amount_cents: amount_cents
     )
   end
 
@@ -30,7 +23,7 @@ RSpec.describe Credits::CreditNoteService do
       total_amount_cents: 20,
       balance_amount_cents: 20,
       credit_amount_cents: 20,
-      customer: customer,
+      customer:
     )
   end
 
@@ -40,8 +33,13 @@ RSpec.describe Credits::CreditNoteService do
       total_amount_cents: 50,
       balance_amount_cents: 50,
       credit_amount_cents: 50,
-      customer: customer,
+      customer:
     )
+  end
+
+  before do
+    credit_note1
+    credit_note2
   end
 
   describe '.call' do
@@ -57,6 +55,7 @@ RSpec.describe Credits::CreditNoteService do
         expect(credit1.credit_note).to eq(credit_note1)
         expect(credit1.amount_cents).to eq(20)
         expect(credit1.amount_currency).to eq('EUR')
+        expect(credit1.before_taxes).to eq(false)
         expect(credit_note1.reload.balance_amount_cents).to be_zero
         expect(credit_note1).to be_consumed
 
@@ -65,8 +64,11 @@ RSpec.describe Credits::CreditNoteService do
         expect(credit2.credit_note).to eq(credit_note2)
         expect(credit2.amount_cents).to eq(50)
         expect(credit2.amount_currency).to eq('EUR')
+        expect(credit2.before_taxes).to eq(false)
         expect(credit_note2.reload.balance_amount_cents).to be_zero
         expect(credit_note1).to be_consumed
+
+        expect(invoice.credit_notes_amount_cents).to eq(70)
       end
     end
 

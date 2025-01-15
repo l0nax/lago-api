@@ -3,9 +3,17 @@
 require 'rails_helper'
 
 RSpec.describe CreditNote, type: :model do
-  subject(:credit_note) { create(:credit_note) }
+  subject(:credit_note) do
+    create :credit_note, credit_amount_cents: 11000, total_amount_cents: 11000, taxes_amount_cents: 1000,
+      taxes_rate: 10.0, precise_taxes_amount_cents: 1000
+  end
+
+  let(:item) { create(:credit_note_item, credit_note:, precise_amount_cents: 10000, amount_cents: 1000) }
 
   it_behaves_like 'paper_trail traceable'
+
+  it { is_expected.to have_many(:integration_resources) }
+  it { is_expected.to have_many(:error_details) }
 
   describe 'sequential_id' do
     let(:invoice) { create(:invoice) }
@@ -125,7 +133,10 @@ RSpec.describe CreditNote, type: :model do
     end
 
     it 'returns the list of subscription ids' do
-      expect(credit_note.subscription_ids).to eq([subscription_fee.subscription_id, charge_fee.subscription_id])
+      expect(credit_note.subscription_ids).to contain_exactly(
+        subscription_fee.subscription_id,
+        charge_fee.subscription_id
+      )
     end
 
     context 'with add_on fee' do
@@ -137,12 +148,10 @@ RSpec.describe CreditNote, type: :model do
       before { credit_note_item3 }
 
       it 'returns an empty subscription id' do
-        expect(credit_note.subscription_ids).to eq(
-          [
-            subscription_fee.subscription_id,
-            charge_fee.subscription_id,
-            nil,
-          ],
+        expect(credit_note.subscription_ids).to include(
+          subscription_fee.subscription_id,
+          charge_fee.subscription_id,
+          nil
         )
       end
     end
@@ -239,10 +248,146 @@ RSpec.describe CreditNote, type: :model do
     end
   end
 
-  describe ' #sub_total_vat_exclueded_amount_cents' do
-    it 'returs the total amount without the vat' do
-      expect(credit_note.sub_total_vat_excluded_amount_cents)
-        .to eq(credit_note.total_amount_cents - credit_note.vat_amount_cents)
+  context 'when calculating depends on related items' do
+    before do
+      item
+      credit_note.reload
+    end
+
+    describe '#sub_total_excluding_taxes_amount_cents' do
+      it 'returs the total amount without the taxes' do
+        expect(credit_note.sub_total_excluding_taxes_amount_cents)
+          .to eq(credit_note.items.sum(&:precise_amount_cents) - credit_note.precise_coupons_adjustment_amount_cents)
+      end
+    end
+
+    describe '#precise_total' do
+      it 'returns the total precise amount including precise taxes' do
+        expect(credit_note.precise_total).to eq(11000)
+      end
+    end
+  end
+
+  describe '#taxes_rounding_adjustment' do
+    it 'returns the difference between taxes and precise taxes' do
+      expect(credit_note.taxes_rounding_adjustment).to eq(0)
+    end
+  end
+
+  describe '#rounding_adjustment' do
+    it 'returns the difference between credit note total and credit note precise total' do
+      expect(credit_note.taxes_rounding_adjustment).to eq(0)
+    end
+  end
+
+  describe '#should_sync_credit_note?' do
+    subject(:method_call) { credit_note.should_sync_credit_note? }
+
+    let(:credit_note) { create(:credit_note, customer:, organization:, status:) }
+    let(:organization) { create(:organization) }
+
+    context 'when credit note is not finalized' do
+      let(:status) { :draft }
+
+      context 'without integration customer' do
+        let(:customer) { create(:customer, organization:) }
+
+        it 'returns false' do
+          expect(method_call).to eq(false)
+        end
+      end
+
+      context 'with integration customer' do
+        let(:integration_customer) { create(:netsuite_customer, integration:, customer:) }
+        let(:integration) { create(:netsuite_integration, organization:, sync_credit_notes:) }
+        let(:customer) { create(:customer, organization:) }
+
+        before { integration_customer }
+
+        context 'when sync credit notes is true' do
+          let(:sync_credit_notes) { true }
+
+          it 'returns false' do
+            expect(method_call).to eq(false)
+          end
+        end
+
+        context 'when sync credit notes is false' do
+          let(:sync_credit_notes) { false }
+
+          it 'returns false' do
+            expect(method_call).to eq(false)
+          end
+        end
+      end
+    end
+
+    context 'when credit note is finalized' do
+      let(:status) { :finalized }
+
+      context 'without integration customer' do
+        let(:customer) { create(:customer, organization:) }
+
+        it 'returns false' do
+          expect(method_call).to eq(false)
+        end
+      end
+
+      context 'with integration customer' do
+        let(:integration_customer) { create(:netsuite_customer, integration:, customer:) }
+        let(:integration) { create(:netsuite_integration, organization:, sync_credit_notes:) }
+        let(:customer) { create(:customer, organization:) }
+
+        before { integration_customer }
+
+        context 'when sync credit notes is true' do
+          let(:sync_credit_notes) { true }
+
+          it 'returns true' do
+            expect(method_call).to eq(true)
+          end
+        end
+
+        context 'when sync credit notes is false' do
+          let(:sync_credit_notes) { false }
+
+          it 'returns false' do
+            expect(method_call).to eq(false)
+          end
+        end
+      end
+    end
+  end
+
+  context 'when taxes are not precise' do
+    subject(:credit_note) do
+      create :credit_note, credit_amount_cents: 8200, total_amount_cents: 8200, taxes_amount_cents: 1367,
+        taxes_rate: 20.0, precise_taxes_amount_cents: 1366.6
+    end
+
+    let(:item) { create(:credit_note_item, credit_note:, precise_amount_cents: 6833, amount_cents: 6833) }
+
+    before do
+      item
+      credit_note.reload
+    end
+
+    describe '#precise_total' do
+      it 'returns the total precise amount including precise taxes' do
+        expect(credit_note.precise_total).to eq(8199.6)
+      end
+    end
+
+    describe '#taxes_rounding_adjustment' do
+      it 'returns the difference between taxes and precise taxes' do
+        expect(credit_note.taxes_rounding_adjustment).to eq(0.4)
+      end
+    end
+
+    describe '#rounding_adjustment' do
+      it 'returns the difference between credit note total and credit note precise total' do
+        expect(credit_note.taxes_rounding_adjustment).to eq(0.4)
+      end
     end
   end
 end

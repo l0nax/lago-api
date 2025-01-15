@@ -2,10 +2,26 @@
 
 class WebhooksController < ApplicationController
   def stripe
-    result = PaymentProviders::StripeService.new.handle_incoming_webhook(
+    result = InboundWebhooks::CreateService.call(
       organization_id: params[:organization_id],
-      params: request.body.read,
-      signature: request.headers['HTTP_STRIPE_SIGNATURE'],
+      webhook_source: :stripe,
+      code: params[:code].presence,
+      payload: request.body.read,
+      signature: request.headers["HTTP_STRIPE_SIGNATURE"],
+      event_type: params[:type]
+    )
+
+    return head(:bad_request) unless result.success?
+
+    head(:ok)
+  end
+
+  def gocardless
+    result = PaymentProviders::Gocardless::HandleIncomingWebhookService.call(
+      organization_id: params[:organization_id],
+      code: params[:code].presence,
+      body: request.body.read,
+      signature: request.headers['Webhook-Signature']
     )
 
     unless result.success?
@@ -19,21 +35,23 @@ class WebhooksController < ApplicationController
     head(:ok)
   end
 
-  def gocardless
-    result = PaymentProviders::GocardlessService.new.handle_incoming_webhook(
+  def adyen
+    result = PaymentProviders::Adyen::HandleIncomingWebhookService.call(
       organization_id: params[:organization_id],
-      body: request.body.read,
-      signature: request.headers['Webhook-Signature'],
+      code: params[:code].presence,
+      body: adyen_params.to_h
     )
 
     unless result.success?
-      if result.error.is_a?(BaseService::ServiceFailure) && result.error.code == 'webhook_error'
-        return head(:bad_request)
-      end
+      return head(:bad_request) if result.error.code == 'webhook_error'
 
       result.raise_if_error!
     end
 
-    head(:ok)
+    render(json: '[accepted]')
+  end
+
+  def adyen_params
+    params['notificationItems']&.first&.dig('NotificationRequestItem')&.permit!
   end
 end

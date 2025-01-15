@@ -3,8 +3,10 @@
 require 'rails_helper'
 
 RSpec.describe Mutations::Invites::Revoke, type: :graphql do
-  let(:organization) { create(:organization) }
-  let(:user) { create(:user) }
+  let(:required_permission) { 'organization:members:delete' }
+  let(:membership) { create(:membership) }
+  let(:organization) { membership.organization }
+  let(:user) { membership.user }
 
   let(:mutation) do
     <<-GQL
@@ -18,18 +20,23 @@ RSpec.describe Mutations::Invites::Revoke, type: :graphql do
     GQL
   end
 
+  it_behaves_like 'requires current user'
+  it_behaves_like 'requires current organization'
+  it_behaves_like 'requires permission', 'organization:members:delete'
+
   describe 'Invite revoke mutation' do
     context 'with an existing invite' do
-      let(:invite) { create(:invite, organization: organization) }
+      let(:invite) { create(:invite, organization:) }
 
       it 'returns the revoked invite' do
         result = execute_graphql(
           current_organization: organization,
           current_user: user,
+          permissions: required_permission,
           query: mutation,
           variables: {
-            input: { id: invite.id },
-          },
+            input: {id: invite.id}
+          }
         )
 
         data = result['data']['revokeInvite']
@@ -41,16 +48,17 @@ RSpec.describe Mutations::Invites::Revoke, type: :graphql do
     end
 
     context 'when the invite accepted' do
-      let(:invite) { create(:invite, organization: organization, status: :accepted) }
+      let(:invite) { create(:invite, organization:, status: :accepted) }
 
       it 'returns an error' do
         result = execute_graphql(
           current_organization: organization,
+          permissions: required_permission,
           current_user: user,
           query: mutation,
           variables: {
-            input: { id: invite.id },
-          },
+            input: {id: invite.id}
+          }
         )
 
         aggregate_failures do

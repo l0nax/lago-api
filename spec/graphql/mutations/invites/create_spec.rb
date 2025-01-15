@@ -3,16 +3,18 @@
 require 'rails_helper'
 
 RSpec.describe Mutations::Invites::Create, type: :graphql do
+  let(:required_permission) { 'organization:members:create' }
   let(:membership) { create(:membership) }
   let(:revoked_membership) do
     create(
       :membership,
       organization: membership.organization,
-      status: :revoked,
+      status: :revoked
     )
   end
   let(:organization) { membership.organization }
   let(:email) { Faker::Internet.email }
+  let(:role) { 'finance' }
 
   let(:mutation) do
     <<~GQL
@@ -21,26 +23,34 @@ RSpec.describe Mutations::Invites::Create, type: :graphql do
           id
           token
           email
+          role
         }
       }
     GQL
   end
 
+  it_behaves_like 'requires current user'
+  it_behaves_like 'requires current organization'
+  it_behaves_like 'requires permission', 'organization:members:create'
+
   it 'creates an invite for a new user' do
     result = execute_graphql(
       current_user: membership.user,
       current_organization: membership.organization,
+      permissions: required_permission,
       query: mutation,
       variables: {
         input: {
-          email: email,
-        },
-      },
+          email:,
+          role:
+        }
+      }
     )
 
     data = result['data']['createInvite']
 
     expect(data['email']).to eq(email)
+    expect(data['role']).to eq(role)
     expect(data['token']).to be_present
   end
 
@@ -48,12 +58,14 @@ RSpec.describe Mutations::Invites::Create, type: :graphql do
     result = execute_graphql(
       current_user: membership.user,
       current_organization: membership.organization,
+      permissions: required_permission,
       query: mutation,
       variables: {
         input: {
           email: revoked_membership.user.email,
-        },
-      },
+          role:
+        }
+      }
     )
 
     data = result['data']['createInvite']
@@ -63,17 +75,19 @@ RSpec.describe Mutations::Invites::Create, type: :graphql do
   end
 
   it 'returns an error if invite already exists' do
-    create(:invite, email: email, recipient: membership, organization: membership.organization)
+    create(:invite, email:, recipient: membership, organization: membership.organization)
 
     result = execute_graphql(
       current_user: membership.user,
       current_organization: membership.organization,
+      permissions: required_permission,
       query: mutation,
       variables: {
         input: {
-          email: email,
-        },
-      },
+          email:,
+          role:
+        }
+      }
     )
 
     expect(result['errors'].first['extensions']['status']).to eq(422)
@@ -85,12 +99,14 @@ RSpec.describe Mutations::Invites::Create, type: :graphql do
     result = execute_graphql(
       current_user: membership.user,
       current_organization: membership.organization,
+      permissions: required_permission,
       query: mutation,
       variables: {
         input: {
           email: membership.user.email,
-        },
-      },
+          role:
+        }
+      }
     )
 
     expect(result['errors'].first['extensions']['status']).to eq(422)

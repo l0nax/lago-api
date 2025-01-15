@@ -3,6 +3,15 @@
 require 'rails_helper'
 
 RSpec.describe Credit, type: :model do
+  subject(:credit) { create(:credit) }
+
+  describe 'associations' do
+    it { is_expected.to belong_to(:invoice) }
+    it { is_expected.to belong_to(:applied_coupon).optional }
+    it { is_expected.to belong_to(:credit_note).optional }
+    it { is_expected.to belong_to(:progressive_billing_invoice).optional }
+  end
+
   describe 'invoice item' do
     context 'when credit is a coupon' do
       subject(:credit) { create(:credit, applied_coupon:) }
@@ -12,7 +21,7 @@ RSpec.describe Credit, type: :model do
         create(
           :coupon,
           code: 'coupon_code',
-          name: 'Coupon name',
+          name: 'Coupon name'
         )
       end
 
@@ -33,7 +42,7 @@ RSpec.describe Credit, type: :model do
             code: 'coupon_code',
             name: 'Coupon name',
             amount_cents: 200,
-            amount_currency: 'EUR',
+            amount_currency: 'EUR'
           )
         end
 
@@ -60,6 +69,21 @@ RSpec.describe Credit, type: :model do
           expect(credit.item_type).to eq('credit_note')
           expect(credit.item_code).to eq(credit_note.number)
           expect(credit.item_name).to eq(credit_note.invoice.number)
+        end
+      end
+    end
+
+    context 'when credit is a progressive billing invoice' do
+      subject(:credit) { create(:progressive_billing_invoice_credit, progressive_billing_invoice:) }
+
+      let(:progressive_billing_invoice) { create(:invoice, invoice_type: :progressive_billing) }
+
+      it 'returns invoice details', aggregate_failures: true do
+        aggregate_failures do
+          expect(credit.item_id).to eq(progressive_billing_invoice.id)
+          expect(credit.item_type).to eq('invoice')
+          expect(credit.item_code).to eq(progressive_billing_invoice.number)
+          expect(credit.item_name).to eq(progressive_billing_invoice.number)
         end
       end
     end

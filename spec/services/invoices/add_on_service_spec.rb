@@ -4,11 +4,18 @@ require 'rails_helper'
 
 RSpec.describe Invoices::AddOnService, type: :service do
   subject(:invoice_service) do
-    described_class.new(applied_add_on: applied_add_on, datetime: datetime)
+    described_class.new(applied_add_on:, datetime:)
   end
 
   let(:datetime) { Time.zone.now }
-  let(:applied_add_on) { create(:applied_add_on) }
+
+  let(:customer) { create(:customer) }
+  let(:organization) { customer.organization }
+  let(:applied_add_on) { create(:applied_add_on, customer:) }
+
+  let(:tax) { create(:tax, rate: 20, organization:) }
+
+  before { tax }
 
   describe 'create' do
     before do
@@ -22,17 +29,20 @@ RSpec.describe Invoices::AddOnService, type: :service do
         expect(result).to be_success
 
         expect(result.invoice.subscriptions.first).to be_nil
-        expect(result.invoice.issuing_date).to eq(datetime.to_date)
-        expect(result.invoice.invoice_type).to eq('add_on')
-        expect(result.invoice.payment_status).to eq('pending')
+        expect(result.invoice).to have_attributes(
+          issuing_date: datetime.to_date,
+          invoice_type: 'add_on',
+          payment_status: 'pending',
+          currency: 'EUR',
+          fees_amount_cents: 200,
+          sub_total_excluding_taxes_amount_cents: 200,
+          taxes_amount_cents: 40,
+          taxes_rate: 20,
+          sub_total_including_taxes_amount_cents: 240,
+          total_amount_cents: 240
+        )
 
-        expect(result.invoice.amount_cents).to eq(200)
-        expect(result.invoice.amount_currency).to eq('EUR')
-        expect(result.invoice.vat_amount_cents).to eq(40)
-        expect(result.invoice.vat_amount_currency).to eq('EUR')
-        expect(result.invoice.vat_rate).to eq(20)
-        expect(result.invoice.total_amount_cents).to eq(240)
-        expect(result.invoice.total_amount_currency).to eq('EUR')
+        expect(result.invoice.applied_taxes.count).to eq(1)
 
         expect(result.invoice).to be_finalized
       end
@@ -44,6 +54,32 @@ RSpec.describe Invoices::AddOnService, type: :service do
       end.to have_enqueued_job(SendWebhookJob)
     end
 
+    it 'enqueue an GeneratePdfAndNotifyJob with email false' do
+      expect do
+        invoice_service.create
+      end.to have_enqueued_job(Invoices::GeneratePdfAndNotifyJob).with(hash_including(email: false))
+    end
+
+    context 'with lago_premium' do
+      around { |test| lago_premium!(&test) }
+
+      it 'enqueues an GeneratePdfAndNotifyJob with email true' do
+        expect do
+          invoice_service.create
+        end.to have_enqueued_job(Invoices::GeneratePdfAndNotifyJob).with(hash_including(email: true))
+      end
+
+      context 'when organization does not have right email settings' do
+        before { applied_add_on.customer.organization.update!(email_settings: []) }
+
+        it 'enqueue an GeneratePdfAndNotifyJob with email false' do
+          expect do
+            invoice_service.create
+          end.to have_enqueued_job(Invoices::GeneratePdfAndNotifyJob).with(hash_including(email: false))
+        end
+      end
+    end
+
     it 'calls SegmentTrackJob' do
       invoice = invoice_service.create.invoice
 
@@ -53,32 +89,26 @@ RSpec.describe Invoices::AddOnService, type: :service do
         properties: {
           organization_id: invoice.organization.id,
           invoice_id: invoice.id,
-          invoice_type: invoice.invoice_type,
-        },
+          invoice_type: invoice.invoice_type
+        }
       )
     end
 
     it 'creates a payment' do
-      payment_create_service = instance_double(Invoices::Payments::CreateService)
       allow(Invoices::Payments::CreateService)
-        .to receive(:new).and_return(payment_create_service)
-      allow(payment_create_service)
-        .to receive(:call)
+        .to receive(:call_async)
 
       invoice_service.create
 
-      expect(Invoices::Payments::CreateService).to have_received(:new)
-      expect(payment_create_service).to have_received(:call)
+      expect(Invoices::Payments::CreateService).to have_received(:call_async)
     end
 
-    context 'when organization does not have a webhook url' do
-      before { applied_add_on.customer.organization.update!(webhook_url: nil) }
+    it_behaves_like 'syncs invoice' do
+      let(:service_call) { invoice_service.create }
+    end
 
-      it 'does not enqueues a SendWebhookJob' do
-        expect do
-          invoice_service.create
-        end.not_to have_enqueued_job(SendWebhookJob)
-      end
+    it_behaves_like "applies invoice_custom_sections" do
+      let(:service_call) { invoice_service.create }
     end
 
     context 'with customer timezone' do

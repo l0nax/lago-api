@@ -9,34 +9,37 @@ module Customers
     end
 
     def call
-      ActiveRecord::Base.transaction do
-        customer.update!(invoice_grace_period: grace_period)
+      old_grace_period = customer.invoice_grace_period
+      old_applicable_grace_period = customer.applicable_invoice_grace_period.to_i
 
-        # NOTE: Finalize related draft invoices.
-        customer.invoices.ready_to_be_finalized.each do |invoice|
-          Invoices::FinalizeService.call(invoice:)
-        end
+      if grace_period != old_grace_period
+        customer.invoice_grace_period = grace_period
+        customer.save!
+
+        grace_period_diff = customer.applicable_invoice_grace_period.to_i - old_applicable_grace_period
 
         # NOTE: Update issuing_date on draft invoices.
-        customer.invoices.draft.each do |invoice|
-          invoice.update!(issuing_date: grace_period_issuing_date(invoice))
+        customer.invoices.draft.find_each do |invoice|
+          invoice.issuing_date = invoice.issuing_date + grace_period_diff.days
+          invoice.payment_due_date = grace_period_payment_due_date(invoice)
+          invoice.save!
         end
 
-        result.customer = customer
-        result
+        customer.invoices.ready_to_be_finalized.find_each do |invoice|
+          Invoices::FinalizeJob.perform_later(invoice)
+        end
       end
+
+      result.customer = customer
+      result
     end
 
     private
 
     attr_reader :customer, :grace_period
 
-    def invoice_created_at(invoice)
-      invoice.created_at.in_time_zone(customer.applicable_timezone).to_date
-    end
-
-    def grace_period_issuing_date(invoice)
-      invoice_created_at(invoice) + customer.applicable_invoice_grace_period.days
+    def grace_period_payment_due_date(invoice)
+      invoice.issuing_date + customer.applicable_net_payment_term.days
     end
   end
 end

@@ -1,4 +1,4 @@
-# freozen_string_literal: true
+# frozen_string_literal: true
 
 module Resolvers
   class VersionResolver < Resolvers::BaseResolver
@@ -7,8 +7,7 @@ module Resolvers
     type Types::Utils::CurrentVersion, null: false
 
     def resolve
-      result = Utils::VersionService.new.version
-      result.version
+      LAGO_VERSION
     end
   end
 end

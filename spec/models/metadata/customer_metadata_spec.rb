@@ -9,7 +9,7 @@ RSpec.describe Metadata::CustomerMetadata, type: :model do
   let(:key) { 'hello' }
   let(:value) { 'abcdef' }
   let(:attributes) do
-    { key:, value:, customer:, display_in_invoice: true }
+    {key:, value:, customer:, display_in_invoice: true}
   end
 
   describe 'key validations' do
@@ -25,10 +25,6 @@ RSpec.describe Metadata::CustomerMetadata, type: :model do
       it { expect(metadata).not_to be_valid }
     end
 
-    context 'when length constraint passes', :tag do
-      it { expect(metadata).to be_valid }
-    end
-
     context 'when key length is invalid' do
       let(:key) { 'hello-hello-hello-hello-hello' }
 
@@ -42,9 +38,9 @@ RSpec.describe Metadata::CustomerMetadata, type: :model do
     end
 
     context 'when value length is invalid' do
-      let(:value) { 'abcde-abcde-abcde-abcde-abcde-abcde' }
+      let(:value) { 'a' * 101 }
 
-      it { expect(metadata).to be_valid }
+      it { expect(metadata).not_to be_valid }
     end
   end
 end

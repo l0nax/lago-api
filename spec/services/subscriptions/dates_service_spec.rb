@@ -8,18 +8,18 @@ RSpec.describe Subscriptions::DatesService, type: :service do
   let(:subscription) do
     create(
       :subscription,
-      plan: plan,
-      subscription_at: subscription_at,
+      plan:,
+      subscription_at:,
       billing_time: :anniversary,
-      started_at: started_at,
+      started_at:
     )
   end
 
-  let(:plan) { create(:plan, interval: interval, pay_in_advance: pay_in_advance) }
+  let(:plan) { create(:plan, interval:, pay_in_advance:) }
   let(:pay_in_advance) { false }
 
   let(:subscription_at) { DateTime.parse('02 Feb 2021') }
-  let(:billing_date) { DateTime.parse('07 Mar 2022') }
+  let(:billing_date) { Time.zone.parse('2022-03-07 04:20:46.011') }
   let(:started_at) { subscription_at }
   let(:interval) { :monthly }
 
@@ -31,6 +31,14 @@ RSpec.describe Subscriptions::DatesService, type: :service do
 
       it 'returns a weekly service instance' do
         expect(result).to be_kind_of(Subscriptions::Dates::WeeklyService)
+      end
+    end
+
+    context 'when interval is quarterly' do
+      let(:interval) { :quarterly }
+
+      it 'returns a quarterly service instance' do
+        expect(result).to be_kind_of(Subscriptions::Dates::QuarterlyService)
       end
     end
 

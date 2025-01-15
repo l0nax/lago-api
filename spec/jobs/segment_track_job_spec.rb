@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require 'rails_helper'
 
 describe SegmentTrackJob, job: true do
@@ -7,57 +9,59 @@ describe SegmentTrackJob, job: true do
     let(:membership_id) { "membership/#{SecureRandom.uuid}" }
     let(:event) { 'event' }
     let(:properties) do
-      { method: 1 }
+      {method: 1}
     end
 
     before do
-      stub_const('ENV', 'LAGO_DISABLE_SEGMENT' => '')
+      ENV['LAGO_DISABLE_SEGMENT'] = ''
       allow(CurrentContext).to receive(:membership).and_return(membership_id)
+      allow(SEGMENT_CLIENT).to receive(:track)
     end
 
     it "calls SegmentTrackJob's process method" do
-      expect(SEGMENT_CLIENT).to receive(:track)
+      subject.perform_now(membership_id:, event:, properties:)
+
+      expect(SEGMENT_CLIENT).to have_received(:track)
         .with(
           user_id: membership_id,
-          event: event,
+          event:,
           properties: {
             method: 1,
             hosting_type: 'self',
-            version: Utils::VersionService.new.version.version.number
+            version: 'test'
           }
         )
-
-      subject.perform_now(membership_id: membership_id, event: event, properties: properties)
     end
 
     context 'when LAGO_CLOUD is true' do
       it 'includes hosting type equal to cloud' do
-        stub_const('ENV', 'LAGO_CLOUD' => 'true')
+        ENV['LAGO_CLOUD'] = 'true'
 
-        expect(SEGMENT_CLIENT).to receive(:track).with(
+        subject.perform_now(membership_id:, event:, properties:)
+
+        expect(SEGMENT_CLIENT).to have_received(:track).with(
           hash_including(properties: hash_including(hosting_type: 'cloud'))
         )
-
-        subject.perform_now(membership_id: membership_id, event: event, properties: properties)
       end
     end
 
     context 'when membership is nil' do
       it 'sends event to an unidentifiable membership' do
-        expect(SEGMENT_CLIENT).to receive(:track).with(
+        subject.perform_now(membership_id: nil, event:, properties:)
+
+        expect(SEGMENT_CLIENT).to have_received(:track).with(
           hash_including(user_id: 'membership/unidentifiable')
         )
-
-        subject.perform_now(membership_id: nil, event: event, properties: properties)
       end
     end
 
     context 'when LAGO_DISABLE_SEGMENT is true' do
       it 'does not call SegmentTrackJob' do
-        stub_const('ENV', 'LAGO_DISABLE_SEGMENT' => 'true')
+        ENV['LAGO_DISABLE_SEGMENT'] = 'true'
 
-        expect(SEGMENT_CLIENT).not_to receive(:track)
-        subject.perform_now(membership_id: membership_id, event: event, properties: properties)
+        subject.perform_now(membership_id:, event:, properties:)
+
+        expect(SEGMENT_CLIENT).not_to have_received(:track)
       end
     end
   end

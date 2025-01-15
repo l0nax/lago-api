@@ -8,8 +8,8 @@ module ExecutionErrorResponder
 
   def execution_error(error: 'Internal Error', status: 422, code: 'internal_error', details: nil)
     payload = {
-      status: status,
-      code: code,
+      status:,
+      code:
     }
 
     if details.is_a?(Hash)
@@ -27,8 +27,8 @@ module ExecutionErrorResponder
       status: 404,
       code: 'not_found',
       details: {
-        resource => ['not_found'],
-      },
+        resource => ['not_found']
+      }
     )
   end
 
@@ -36,7 +36,15 @@ module ExecutionErrorResponder
     execution_error(
       error: 'Method Not Allowed',
       status: 405,
-      code: code,
+      code:
+    )
+  end
+
+  def forbidden_error(code:)
+    execution_error(
+      error: 'forbidden',
+      status: 403,
+      code:
     )
   end
 
@@ -45,7 +53,7 @@ module ExecutionErrorResponder
       error: 'Unprocessable Entity',
       status: 422,
       code: 'unprocessable_entity',
-      details: messages,
+      details: messages
     )
   end
 
@@ -57,11 +65,13 @@ module ExecutionErrorResponder
       not_allowed_error(code: service_result.error.code)
     when BaseService::ValidationFailure
       validation_error(messages: service_result.error.messages)
+    when BaseService::ForbiddenFailure
+      forbidden_error(code: service_result.error.code)
     else
       execution_error(
         error: 'Internal error',
         status: 500,
-        code: service_result.error.code,
+        code: service_result.error.code
       )
     end
   end

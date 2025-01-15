@@ -3,6 +3,7 @@
 require 'rails_helper'
 
 RSpec.describe Mutations::CreditNotes::Create, type: :graphql do
+  let(:required_permission) { 'credit_notes:create' }
   let(:organization) { create(:organization) }
   let(:membership) { create(:membership, organization:) }
   let(:customer) { create(:customer, organization:) }
@@ -16,12 +17,10 @@ RSpec.describe Mutations::CreditNotes::Create, type: :graphql do
       customer:,
       organization:,
       payment_status: 'succeeded',
-      amount_cents: 100,
-      amount_currency: 'EUR',
-      vat_amount_cents: 120,
-      vat_amount_currency: 'EUR',
-      total_amount_cents: 120,
-      total_amount_currency: 'EUR',
+      currency: 'EUR',
+      fees_amount_cents: 100,
+      taxes_amount_cents: 120,
+      total_amount_cents: 120
     )
   end
 
@@ -34,14 +33,11 @@ RSpec.describe Mutations::CreditNotes::Create, type: :graphql do
           refundStatus
           reason
           description
+          currency
           totalAmountCents
-          totalAmountCurrency
           creditAmountCents
-          creditAmountCurrency
           balanceAmountCents
-          balanceAmountCurrency
           refundAmountCents
-          refundAmountCurrency
           items {
             id
             amountCents
@@ -55,10 +51,15 @@ RSpec.describe Mutations::CreditNotes::Create, type: :graphql do
 
   around { |test| lago_premium!(&test) }
 
+  it_behaves_like 'requires current user'
+  it_behaves_like 'requires current organization'
+  it_behaves_like 'requires permission', 'credit_notes:create'
+
   it 'creates a credit note' do
     result = execute_graphql(
       current_user: membership.user,
       current_organization: organization,
+      permissions: required_permission,
       query: mutation,
       variables: {
         input: {
@@ -70,15 +71,15 @@ RSpec.describe Mutations::CreditNotes::Create, type: :graphql do
           items: [
             {
               feeId: fee1.id,
-              amountCents: 10,
+              amountCents: 10
             },
             {
               feeId: fee2.id,
-              amountCents: 5,
-            },
-          ],
-        },
-      },
+              amountCents: 5
+            }
+          ]
+        }
+      }
     )
 
     result_data = result['data']['createCreditNote']
@@ -89,14 +90,11 @@ RSpec.describe Mutations::CreditNotes::Create, type: :graphql do
       expect(result_data['refundStatus']).to eq('pending')
       expect(result_data['reason']).to eq('duplicated_charge')
       expect(result_data['description']).to eq('Duplicated charge')
+      expect(result_data['currency']).to eq('EUR')
       expect(result_data['totalAmountCents']).to eq('15')
-      expect(result_data['totalAmountCurrency']).to eq('EUR')
       expect(result_data['creditAmountCents']).to eq('10')
-      expect(result_data['creditAmountCurrency']).to eq('EUR')
       expect(result_data['balanceAmountCents']).to eq('10')
-      expect(result_data['balanceAmountCurrency']).to eq('EUR')
       expect(result_data['refundAmountCents']).to eq('5')
-      expect(result_data['refundAmountCurrency']).to eq('EUR')
 
       expect(result_data['items'][0]['id']).to be_present
       expect(result_data['items'][0]['amountCents']).to eq('10')
@@ -115,6 +113,7 @@ RSpec.describe Mutations::CreditNotes::Create, type: :graphql do
       result = execute_graphql(
         current_user: membership.user,
         current_organization: organization,
+        permissions: required_permission,
         query: mutation,
         variables: {
           input: {
@@ -125,64 +124,14 @@ RSpec.describe Mutations::CreditNotes::Create, type: :graphql do
             items: [
               {
                 feeId: fee1.id,
-                amountCents: 15,
-              },
-            ],
-          },
-        },
+                amountCents: 15
+              }
+            ]
+          }
+        }
       )
 
       expect_not_found(result)
-    end
-  end
-
-  context 'without current user' do
-    it 'returns an error' do
-      result = execute_graphql(
-        current_organization: organization,
-        query: mutation,
-        variables: {
-          input: {
-            reason: 'duplicated_charge',
-            invoiceId: invoice.id,
-            creditAmountCents: 10,
-            refundAmountCents: 5,
-            items: [
-              {
-                feeId: fee1.id,
-                amountCents: 15,
-              },
-            ],
-          },
-        },
-      )
-
-      expect_unauthorized_error(result)
-    end
-  end
-
-  context 'without current organization' do
-    it 'returns an error' do
-      result = execute_graphql(
-        current_user: membership.user,
-        query: mutation,
-        variables: {
-          input: {
-            reason: 'duplicated_charge',
-            invoiceId: invoice.id,
-            creditAmountCents: 10,
-            refundAmountCents: 5,
-            items: [
-              {
-                feeId: fee1.id,
-                amountCents: 15,
-              },
-            ],
-          },
-        },
-      )
-
-      expect_forbidden_error(result)
     end
   end
 end

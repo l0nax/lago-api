@@ -3,14 +3,20 @@
 require 'rails_helper'
 
 RSpec.describe Resolvers::InvoiceResolver, type: :graphql do
+  let(:required_permission) { 'invoices:view' }
   let(:query) do
     <<~GQL
       query($id: ID!) {
         invoice(id: $id) {
           id
           number
+          feesAmountCents
+          couponsAmountCents
+          creditNotesAmountCents
+          prepaidCreditAmountCents
           refundableAmountCents
           creditableAmountCents
+          paymentDisputeLosable
           paymentStatus
           status
           customer {
@@ -18,19 +24,44 @@ RSpec.describe Resolvers::InvoiceResolver, type: :graphql do
             name
             deletedAt
           }
+          appliedTaxes {
+            taxCode
+            taxName
+            taxRate
+            taxDescription
+            amountCents
+            amountCurrency
+          }
           invoiceSubscriptions {
             fromDatetime
             toDatetime
+            chargesFromDatetime
+            chargesToDatetime
             subscription {
               id
             }
             fees {
+              currency
               id
               itemType
               itemCode
               itemName
-              group { id key value }
               charge { id billableMetric { code } }
+              taxesRate
+              taxesAmountCents
+              trueUpFee { id }
+              trueUpParentFee { id }
+              units
+              preciseUnitAmount
+              chargeFilter { invoiceDisplayName values }
+              appliedTaxes {
+                taxCode
+                taxName
+                taxRate
+                taxDescription
+                amountCents
+                amountCurrency
+              }
             }
           }
           subscriptions {
@@ -44,8 +75,11 @@ RSpec.describe Resolvers::InvoiceResolver, type: :graphql do
             creditableAmountCents
             charge {
               id
-              billableMetric { code group flatGroups { id key } }
-              groupProperties { groupId }
+              billableMetric {
+                code
+                filters { key values }
+              }
+              filters { invoiceDisplayName values }
             }
           }
         }
@@ -57,20 +91,25 @@ RSpec.describe Resolvers::InvoiceResolver, type: :graphql do
   let(:organization) { membership.organization }
   let(:customer) { create(:customer, organization:) }
   let(:invoice_subscription) { create(:invoice_subscription, invoice:) }
-  let(:invoice) { create(:invoice, customer:, organization:) }
+  let(:invoice) { create(:invoice, customer:, organization:, fees_amount_cents: 10) }
   let(:subscription) { invoice_subscription.subscription }
   let(:fee) { create(:fee, subscription:, invoice:, amount_cents: 10) }
 
   before { fee and invoice }
 
+  it_behaves_like 'requires current user'
+  it_behaves_like 'requires current organization'
+  it_behaves_like 'requires permission', 'invoices:view'
+
   it 'returns a single invoice' do
     result = execute_graphql(
       current_user: membership.user,
       current_organization: organization,
-      query: query,
+      permissions: required_permission,
+      query:,
       variables: {
-        id: invoice.id,
-      },
+        id: invoice.id
+      }
     )
 
     data = result['data']['invoice']
@@ -79,6 +118,7 @@ RSpec.describe Resolvers::InvoiceResolver, type: :graphql do
       expect(data['id']).to eq(invoice.id)
       expect(data['number']).to eq(invoice.number)
       expect(data['paymentStatus']).to eq(invoice.payment_status)
+      expect(data['paymentDisputeLosable']).to eq(true)
       expect(data['status']).to eq(invoice.status)
       expect(data['customer']['id']).to eq(customer.id)
       expect(data['customer']['name']).to eq(customer.name)
@@ -87,23 +127,23 @@ RSpec.describe Resolvers::InvoiceResolver, type: :graphql do
     end
   end
 
-  it 'includes group for each fee' do
-    group1 = create(:group, key: 'cloud', value: 'aws')
-    group2 = create(:group, key: 'region', value: 'usa', parent_group_id: group1.id)
-    fee.update!(group_id: group2.id)
+  it 'includes filters for each fee' do
+    billable_metric_filter = create(:billable_metric_filter, key: 'cloud', values: %w[aws gcp])
+    charge_filter = create(:charge_filter, invoice_display_name: nil)
+    charge_filter_value = create(:charge_filter_value, billable_metric_filter:, charge_filter:, values: ['aws'])
+
+    fee.update!(charge_filter_id: charge_filter.id)
 
     result = execute_graphql(
       current_user: membership.user,
       current_organization: organization,
-      query: query,
-      variables: { id: invoice.id },
+      permissions: required_permission,
+      query:,
+      variables: {id: invoice.id}
     )
 
-    group = result['data']['invoice']['invoiceSubscriptions'][0]['fees'][0]['group']
-
-    expect(group['id']).to eq(group2.id)
-    expect(group['key']).to eq('aws')
-    expect(group['value']).to eq('usa')
+    fee = result['data']['invoice']['invoiceSubscriptions'][0]['fees'][0]
+    expect(fee['chargeFilter']['values'][billable_metric_filter.key]).to eq(charge_filter_value.values)
   end
 
   context 'when invoice is not found' do
@@ -111,45 +151,47 @@ RSpec.describe Resolvers::InvoiceResolver, type: :graphql do
       result = execute_graphql(
         current_user: membership.user,
         current_organization: invoice.organization,
-        query: query,
+        permissions: required_permission,
+        query:,
         variables: {
-          id: 'foo',
-        },
+          id: 'foo'
+        }
       )
 
-      expect_graphql_error(
-        result: result,
-        message: 'Resource not found',
-      )
+      expect_graphql_error(result:, message: 'Resource not found')
     end
   end
 
   context 'with a deleted billable metric' do
     let(:billable_metric) { create(:billable_metric, :deleted) }
-    let(:group) { create(:group, :deleted, billable_metric:) }
-    let(:fee) { create(:charge_fee, subscription:, invoice:, group:, charge:, amount_cents: 10) }
-
-    let(:group_property) do
-      build(
-        :group_property,
+    let(:billable_metric_filter) { create(:billable_metric_filter, :deleted, billable_metric:) }
+    let(:charge_filter) do
+      create(:charge_filter, :deleted, charge:, properties: {amount: '10'})
+    end
+    let(:charge_filter_value) do
+      create(
+        :charge_filter_value,
         :deleted,
-        group:,
-        values: { amount: '10', amount_currency: 'EUR' },
+        charge_filter:,
+        billable_metric_filter:,
+        values: [billable_metric_filter.values.first]
       )
     end
+    let(:fee) { create(:charge_fee, subscription:, invoice:, charge_filter:, charge:, amount_cents: 10) }
 
     let(:charge) do
-      create(:standard_charge, :deleted, billable_metric:, group_properties: [group_property])
+      create(:standard_charge, :deleted, billable_metric:)
     end
 
     it 'returns the invoice with the deleted resources' do
       result = execute_graphql(
         current_user: membership.user,
         current_organization: organization,
+        permissions: required_permission,
         query:,
         variables: {
-          id: invoice.id,
-        },
+          id: invoice.id
+        }
       )
 
       data = result['data']['invoice']
@@ -168,7 +210,7 @@ RSpec.describe Resolvers::InvoiceResolver, type: :graphql do
   end
 
   context 'with an add on invoice' do
-    let(:invoice) { create(:invoice, customer:, organization:) }
+    let(:invoice) { create(:invoice, customer:, organization:, fees_amount_cents: 10) }
     let(:add_on) { create(:add_on, organization:) }
     let(:applied_add_on) { create(:applied_add_on, add_on:, customer:) }
     let(:fee) { create(:add_on_fee, invoice:, applied_add_on:) }
@@ -177,10 +219,11 @@ RSpec.describe Resolvers::InvoiceResolver, type: :graphql do
       result = execute_graphql(
         current_user: membership.user,
         current_organization: organization,
+        permissions: required_permission,
         query:,
         variables: {
-          id: invoice.id,
-        },
+          id: invoice.id
+        }
       )
 
       data = result['data']['invoice']
@@ -192,9 +235,10 @@ RSpec.describe Resolvers::InvoiceResolver, type: :graphql do
         expect(data['status']).to eq(invoice.status)
         expect(data['customer']['id']).to eq(customer.id)
         expect(data['customer']['name']).to eq(customer.name)
-        expect(data['fees'].first['itemType']).to eq('add_on')
-        expect(data['fees'].first['itemCode']).to eq(add_on.code)
-        expect(data['fees'].first['itemName']).to eq(add_on.name)
+        expect(data['fees'].first).to include(
+          'itemCode' => add_on.code,
+          'itemName' => add_on.name
+        )
       end
     end
 
@@ -205,10 +249,11 @@ RSpec.describe Resolvers::InvoiceResolver, type: :graphql do
         result = execute_graphql(
           current_user: membership.user,
           current_organization: organization,
+          permissions: required_permission,
           query:,
           variables: {
-            id: invoice.id,
-          },
+            id: invoice.id
+          }
         )
 
         data = result['data']['invoice']
@@ -220,9 +265,11 @@ RSpec.describe Resolvers::InvoiceResolver, type: :graphql do
           expect(data['status']).to eq(invoice.status)
           expect(data['customer']['id']).to eq(customer.id)
           expect(data['customer']['name']).to eq(customer.name)
-          expect(data['fees'].first['itemType']).to eq('add_on')
-          expect(data['fees'].first['itemCode']).to eq(add_on.code)
-          expect(data['fees'].first['itemName']).to eq(add_on.name)
+          expect(data['fees'].first).to include(
+            'itemType' => 'add_on',
+            'itemCode' => add_on.code,
+            'itemName' => add_on.name
+          )
         end
       end
     end
@@ -235,10 +282,11 @@ RSpec.describe Resolvers::InvoiceResolver, type: :graphql do
       result = execute_graphql(
         current_user: membership.user,
         current_organization: organization,
+        permissions: required_permission,
         query:,
         variables: {
-          id: invoice.id,
-        },
+          id: invoice.id
+        }
       )
 
       data = result['data']['invoice']

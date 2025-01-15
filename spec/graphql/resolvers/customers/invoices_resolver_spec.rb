@@ -3,6 +3,7 @@
 require 'rails_helper'
 
 RSpec.describe Resolvers::Customers::InvoicesResolver, type: :graphql do
+  let(:required_permission) { 'invoices:view' }
   let(:query) do
     <<~GQL
       query($customerId: ID!) {
@@ -27,21 +28,24 @@ RSpec.describe Resolvers::Customers::InvoicesResolver, type: :graphql do
     finalized_invoice
   end
 
+  it_behaves_like 'requires current user'
+  it_behaves_like 'requires current organization'
+  it_behaves_like 'requires permission', 'invoices:view'
+
   it 'returns a list of invoices' do
     result = execute_graphql(
       current_user: membership.user,
       current_organization: organization,
-      query: query,
-      variables: { customerId: customer.id },
+      permissions: required_permission,
+      query:,
+      variables: {customerId: customer.id}
     )
 
     invoices_response = result['data']['customerInvoices']
 
     aggregate_failures do
       expect(invoices_response['collection'].count).to eq(customer.invoices.count)
-      expect(invoices_response['collection'].pluck('id')).to match_array(
-        [draft_invoice.id, finalized_invoice.id],
-      )
+      expect(invoices_response['collection'].pluck('id')).to contain_exactly(draft_invoice.id, finalized_invoice.id)
       expect(invoices_response['metadata']['currentPage']).to eq(1)
       expect(invoices_response['metadata']['totalCount']).to eq(2)
     end
@@ -50,7 +54,7 @@ RSpec.describe Resolvers::Customers::InvoicesResolver, type: :graphql do
   context 'with filter on status' do
     let(:query) do
       <<~GQL
-        query($customerId: ID!, $status: InvoiceStatusTypeEnum!) {
+        query($customerId: ID!, $status: [InvoiceStatusTypeEnum!]) {
           customerInvoices(customerId: $customerId, status: $status) {
             collection { id }
             metadata { currentPage, totalCount }
@@ -63,8 +67,9 @@ RSpec.describe Resolvers::Customers::InvoicesResolver, type: :graphql do
       result = execute_graphql(
         current_user: membership.user,
         current_organization: organization,
-        query: query,
-        variables: { customerId: customer.id, status: 'draft' },
+        permissions: required_permission,
+        query:,
+        variables: {customerId: customer.id, status: ['draft']}
       )
 
       invoices_response = result['data']['customerInvoices']
@@ -77,33 +82,18 @@ RSpec.describe Resolvers::Customers::InvoicesResolver, type: :graphql do
     end
   end
 
-  context 'without current organization' do
-    it 'returns an error' do
-      result = execute_graphql(
-        current_user: membership.user,
-        query: query,
-        variables: { customerId: customer.id },
-      )
-
-      expect_graphql_error(
-        result: result,
-        message: 'Missing organization id',
-      )
-    end
-  end
-
   context 'when not member of the organization' do
     it 'returns an error' do
       result = execute_graphql(
         current_user: membership.user,
         current_organization: create(:organization),
-        query: query,
-        variables: { customerId: customer.id },
+        query:,
+        variables: {customerId: customer.id}
       )
 
       expect_graphql_error(
-        result: result,
-        message: 'Not in organization',
+        result:,
+        message: 'Not in organization'
       )
     end
   end
@@ -113,8 +103,9 @@ RSpec.describe Resolvers::Customers::InvoicesResolver, type: :graphql do
       result = execute_graphql(
         current_user: membership.user,
         current_organization: organization,
-        query: query,
-        variables: { customerId: '123456' },
+        permissions: required_permission,
+        query:,
+        variables: {customerId: '123456'}
       )
 
       invoices_response = result['data']['customerInvoices']

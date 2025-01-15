@@ -8,9 +8,9 @@ RSpec.describe Mutations::Organizations::Update, type: :graphql do
     <<~GQL
       mutation($input: UpdateOrganizationInput!) {
         updateOrganization(input: $input) {
-          webhookUrl
           legalNumber
           legalName
+          taxIdentificationNumber
           email
           addressLine1
           addressLine2
@@ -18,45 +18,66 @@ RSpec.describe Mutations::Organizations::Update, type: :graphql do
           zipcode
           city
           country
+          defaultCurrency
+          netPaymentTerm
           timezone
-          billingConfiguration { vatRate, invoiceFooter, invoiceGracePeriod, documentLocale }
+          emailSettings
+          webhookUrl
+          euTaxManagement,
+          documentNumbering
+          documentNumberPrefix
+          finalizeZeroAmountInvoice
+          billingConfiguration {
+            invoiceFooter,
+            invoiceGracePeriod,
+            documentLocale,
+          }
         }
       }
     GQL
   end
 
+  it_behaves_like 'requires current user'
+  it_behaves_like 'requires current organization'
+
   it 'updates an organization' do
     result = execute_graphql(
       current_user: membership.user,
       current_organization: membership.organization,
+      permissions: Permission::ADMIN_PERMISSIONS_HASH,
       query: mutation,
       variables: {
         input: {
-          webhookUrl: 'http://foo.bar',
           legalNumber: '1234',
           legalName: 'Foobar',
+          taxIdentificationNumber: '2246',
           email: 'foo@bar.com',
           addressLine1: 'Line 1',
           addressLine2: 'Line 2',
+          netPaymentTerm: 10,
           state: 'Foobar',
           zipcode: 'FOO1234',
           city: 'Foobar',
           country: 'FR',
+          defaultCurrency: 'EUR',
+          euTaxManagement: true,
+          webhookUrl: 'https://app.test.dev',
+          documentNumberPrefix: 'ORG-2',
+          finalizeZeroAmountInvoice: false,
           billingConfiguration: {
-            vatRate: 12.5,
             invoiceFooter: 'invoice footer',
-            documentLocale: 'fr',
-          },
-        },
-      },
+            documentLocale: 'fr'
+          }
+        }
+      }
     )
 
     result_data = result['data']['updateOrganization']
 
     aggregate_failures do
-      expect(result_data['webhookUrl']).to eq('http://foo.bar')
       expect(result_data['legalNumber']).to eq('1234')
       expect(result_data['legalName']).to eq('Foobar')
+      expect(result_data['taxIdentificationNumber']).to eq('2246')
       expect(result_data['email']).to eq('foo@bar.com')
       expect(result_data['addressLine1']).to eq('Line 1')
       expect(result_data['addressLine2']).to eq('Line 2')
@@ -64,11 +85,43 @@ RSpec.describe Mutations::Organizations::Update, type: :graphql do
       expect(result_data['zipcode']).to eq('FOO1234')
       expect(result_data['city']).to eq('Foobar')
       expect(result_data['country']).to eq('FR')
+      expect(result_data['defaultCurrency']).to eq('EUR')
+      expect(result_data['netPaymentTerm']).to eq(10)
+      expect(result_data['webhookUrl']).to eq('https://app.test.dev')
+      expect(result_data['documentNumbering']).to eq('per_customer')
+      expect(result_data['documentNumberPrefix']).to eq('ORG-2')
       expect(result_data['billingConfiguration']['invoiceFooter']).to eq('invoice footer')
       expect(result_data['billingConfiguration']['invoiceGracePeriod']).to eq(0)
-      expect(result_data['billingConfiguration']['vatRate']).to eq(12.5)
       expect(result_data['billingConfiguration']['documentLocale']).to eq('fr')
+      expect(result_data['euTaxManagement']).to be_truthy
       expect(result_data['timezone']).to eq('TZ_UTC')
+      expect(result_data['finalizeZeroAmountInvoice']).to be false
+    end
+  end
+
+  context 'without necessary permissions' do
+    it 'ignores permissions-protected field and updates the rest' do
+      result = execute_graphql(
+        current_user: membership.user,
+        current_organization: membership.organization,
+        permissions: %w[],
+        query: mutation,
+        variables: {
+          input: {
+            email: 'foo@bar2.com',
+            taxIdentificationNumber: 'tax007',
+            emailSettings: ['invoice_finalized']
+          }
+        }
+      )
+
+      result_data = result['data']['updateOrganization']
+
+      aggregate_failures do
+        expect(result_data['email']).to eq 'foo@bar2.com'
+        expect(result_data['taxIdentificationNumber']).to eq 'tax007'
+        expect(result_data['emailSettings']).to be_nil
+      end
     end
   end
 
@@ -81,16 +134,18 @@ RSpec.describe Mutations::Organizations::Update, type: :graphql do
       result = execute_graphql(
         current_user: membership.user,
         current_organization: membership.organization,
+        permissions: %w[organization:emails:view organization:invoices:view],
         query: mutation,
         variables: {
           input: {
             email: 'foo@bar.com',
             timezone:,
             billingConfiguration: {
-              invoiceGracePeriod: 3,
+              invoiceGracePeriod: 3
             },
-          },
-        },
+            emailSettings: ['invoice_finalized']
+          }
+        }
       )
 
       result_data = result['data']['updateOrganization']
@@ -98,6 +153,7 @@ RSpec.describe Mutations::Organizations::Update, type: :graphql do
       aggregate_failures do
         expect(result_data['timezone']).to eq(timezone)
         expect(result_data['billingConfiguration']['invoiceGracePeriod']).to eq(3)
+        expect(result_data['emailSettings']).to eq(['invoice_finalized'])
       end
     end
 
@@ -108,16 +164,17 @@ RSpec.describe Mutations::Organizations::Update, type: :graphql do
         result = execute_graphql(
           current_user: membership.user,
           current_organization: membership.organization,
+          permissions: 'organization:invoices:view',
           query: mutation,
           variables: {
             input: {
               email: 'foo@bar.com',
               timezone:,
               billingConfiguration: {
-                invoiceGracePeriod: 3,
-              },
-            },
-          },
+                invoiceGracePeriod: 3
+              }
+            }
+          }
         )
 
         result_data = result['data']['updateOrganization']
@@ -127,55 +184,6 @@ RSpec.describe Mutations::Organizations::Update, type: :graphql do
           expect(result_data['billingConfiguration']['invoiceGracePeriod']).to eq(3)
         end
       end
-    end
-  end
-
-  context 'with invalid webhook url' do
-    it 'returns an error' do
-      result = execute_graphql(
-        current_user: membership.user,
-        current_organization: membership.organization,
-        query: mutation,
-        variables: {
-          input: {
-            webhookUrl: 'bad_url',
-          },
-        },
-      )
-
-      expect_graphql_error(result:, message: :unprocessable_entity)
-    end
-  end
-
-  context 'without current user' do
-    it 'returns an error' do
-      result = execute_graphql(
-        current_organization: membership.organization,
-        query: mutation,
-        variables: {
-          input: {
-            webhookUrl: 'http://foo.bar',
-          },
-        },
-      )
-
-      expect_unauthorized_error(result)
-    end
-  end
-
-  context 'without current organization' do
-    it 'returns an error' do
-      result = execute_graphql(
-        current_user: membership.user,
-        query: mutation,
-        variables: {
-          input: {
-            webhookUrl: 'http://foo.bar',
-          },
-        },
-      )
-
-      expect_forbidden_error(result)
     end
   end
 end

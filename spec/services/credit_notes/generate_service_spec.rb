@@ -75,7 +75,7 @@ RSpec.describe CreditNotes::GenerateService, type: :service do
         credit_note.file.attach(
           io: StringIO.new(File.read(Rails.root.join('spec/fixtures/blank.pdf'))),
           filename: 'credit_note.pdf',
-          content_type: 'application/pdf',
+          content_type: 'application/pdf'
         )
       end
 
@@ -90,6 +90,16 @@ RSpec.describe CreditNotes::GenerateService, type: :service do
 
     context 'when context is API' do
       let(:context) { 'api' }
+
+      it 'calls the SendWebhook job' do
+        expect do
+          credit_note_generate_service.call
+        end.to have_enqueued_job(SendWebhookJob)
+      end
+    end
+
+    context 'when context is admin' do
+      let(:context) { 'admin' }
 
       it 'calls the SendWebhook job' do
         expect do

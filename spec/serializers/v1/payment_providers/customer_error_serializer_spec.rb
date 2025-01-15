@@ -10,8 +10,8 @@ RSpec.describe ::V1::PaymentProviders::CustomerErrorSerializer do
     {
       'provider_error' => {
         'error_message' => 'message',
-        'error_code' => 'code',
-      },
+        'error_code' => 'code'
+      }
     }.with_indifferent_access
   end
 
@@ -22,6 +22,7 @@ RSpec.describe ::V1::PaymentProviders::CustomerErrorSerializer do
       expect(result['data']['lago_customer_id']).to eq(customer.id)
       expect(result['data']['external_customer_id']).to eq(customer.external_id)
       expect(result['data']['payment_provider']).to eq(customer.payment_provider)
+      expect(result['data']['payment_provider_code']).to eq(customer.payment_provider_code)
       expect(result['data']['provider_error']).to eq(options[:provider_error])
     end
   end

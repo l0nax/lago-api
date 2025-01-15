@@ -3,14 +3,17 @@
 require 'rails_helper'
 
 RSpec.describe Invoices::UpdateService do
-  subject(:invoice_service) { described_class.new(invoice: invoice, params: update_args) }
+  subject(:invoice_service) do
+    described_class.new(invoice:, params: update_args, webhook_notification:)
+  end
 
-  let(:invoice) { create(:invoice) }
+  let(:invoice) { create(:invoice, payment_overdue: true) }
   let(:invoice_id) { invoice.id }
+  let(:webhook_notification) { false }
 
   let(:update_args) do
     {
-      payment_status: 'succeeded',
+      payment_status: 'succeeded'
     }
   end
 
@@ -26,7 +29,49 @@ RSpec.describe Invoices::UpdateService do
       aggregate_failures do
         expect(result).to be_success
         expect(result.invoice).to eq(invoice)
-        expect(result.invoice.payment_status).to eq(update_args[:payment_status])
+        expect(result.invoice).to have_attributes(
+          payment_overdue: false,
+          payment_status: update_args[:payment_status]
+        )
+      end
+    end
+
+    context "when invoices is included in a payment request" do
+      let(:customer) do
+        create(
+          :customer,
+          last_dunning_campaign_attempt: 3,
+          last_dunning_campaign_attempt_at: 1.day.ago
+        )
+      end
+
+      let(:invoice) { create(:invoice, payment_overdue: true, customer:) }
+
+      let(:payment_request) do
+        create(:payment_request, customer:, invoices: [invoice])
+      end
+
+      before do
+        payment_request
+      end
+
+      it "does not reset customer dunning campaign status counters" do
+        expect { result && customer.reload }
+          .to not_change(customer, :last_dunning_campaign_attempt)
+          .and not_change { customer.last_dunning_campaign_attempt_at.to_i }
+      end
+
+      context "when payment request belongs to a dunning campaign" do
+        let(:dunning_campaign) { create(:dunning_campaign) }
+        let(:payment_request) do
+          create(:payment_request, customer:, invoices: [invoice], dunning_campaign:)
+        end
+
+        it "resets customer dunning campaign status counters" do
+          expect { result && customer.reload }
+            .to change(customer, :last_dunning_campaign_attempt).to(0)
+            .and change(customer, :last_dunning_campaign_attempt_at).to(nil)
+        end
       end
     end
 
@@ -39,16 +84,139 @@ RSpec.describe Invoices::UpdateService do
         properties: {
           organization_id: invoice.organization.id,
           invoice_id: invoice.id,
-          payment_status: invoice.payment_status,
-        },
+          payment_status: invoice.payment_status
+        }
       )
+    end
+
+    context 'when updating payment status' do
+      context 'when invoice is in draft status' do
+        let(:invoice) { create(:invoice, :draft) }
+
+        it 'does not update the invoice' do
+          aggregate_failures do
+            expect(result).not_to be_success
+            expect(result.error).to be_a(BaseService::MethodNotAllowedFailure)
+            expect(result.error.code).to eq('payment_status_update_on_draft_invoice')
+          end
+        end
+      end
+
+      context 'when invoice is not in draft status' do
+        it 'updates the invoice' do
+          aggregate_failures do
+            expect(result).to be_success
+            expect(result.invoice).to eq(invoice)
+            expect(result.invoice.payment_status).to eq(update_args[:payment_status])
+          end
+        end
+      end
+    end
+
+    context 'with attached fees' do
+      it 'enqueues a job to update the payment_status of the fees' do
+        result
+
+        expect(Invoices::UpdateFeesPaymentStatusJob)
+          .to have_been_enqueued
+          .with(invoice)
+      end
+    end
+
+    context 'with metadata' do
+      let(:invoice_metadata) { create(:invoice_metadata, invoice:) }
+      let(:another_invoice_metadata) { create(:invoice_metadata, invoice:, key: 'test', value: '1') }
+      let(:update_args) do
+        {
+          metadata: [
+            {
+              id: invoice_metadata.id,
+              key: 'new key',
+              value: 'new value'
+            },
+            {
+              key: 'Added key',
+              value: 'Added value'
+            }
+          ]
+        }
+      end
+
+      before do
+        invoice_metadata
+        another_invoice_metadata
+      end
+
+      it 'updates metadata' do
+        metadata_keys = result.invoice.metadata.pluck(:key)
+        metadata_ids = result.invoice.metadata.pluck(:id)
+
+        expect(result.invoice.metadata.count).to eq(2)
+        expect(metadata_keys).to eq(['new key', 'Added key'])
+        expect(metadata_ids).to include(invoice_metadata.id)
+        expect(metadata_ids).not_to include(another_invoice_metadata.id)
+      end
+
+      context 'when invoice is in draft status' do
+        let(:invoice) { create(:invoice, status: 'draft') }
+
+        it 'fails to update metadata' do
+          aggregate_failures do
+            expect(result).not_to be_success
+            expect(result.error).to be_a(BaseService::MethodNotAllowedFailure)
+            expect(result.error.code).to eq('metadata_on_draft_invoice')
+          end
+        end
+      end
+
+      context 'when more than five metadata objects are provided' do
+        let(:update_args) do
+          {
+            metadata: [
+              {
+                id: invoice_metadata.id,
+                key: 'new key',
+                value: 'new value'
+              },
+              {
+                key: 'Added key1',
+                value: 'Added value1'
+              },
+              {
+                key: 'Added key2',
+                value: 'Added value2'
+              },
+              {
+                key: 'Added key3',
+                value: 'Added value3'
+              },
+              {
+                key: 'Added key4',
+                value: 'Added value4'
+              },
+              {
+                key: 'Added key5',
+                value: 'Added value5'
+              }
+            ]
+          }
+        end
+
+        it 'fails to update invoice with metadata' do
+          aggregate_failures do
+            expect(result.error).to be_a(BaseService::ValidationFailure)
+            expect(result.error.messages.keys).to include(:metadata)
+            expect(result.error.messages[:metadata]).to include('invalid_count')
+          end
+        end
+      end
     end
 
     context 'when invoice type is credit and new payment_status is succeeded' do
       let(:subscription) { create(:subscription, customer: invoice.customer) }
       let(:wallet) { create(:wallet, customer: invoice.customer, balance: 10.0, credits_balance: 10.0) }
       let(:wallet_transaction) do
-        create(:wallet_transaction, wallet: wallet, amount: 15.0, credit_amount: 15.0, status: 'pending')
+        create(:wallet_transaction, wallet:, amount: 15.0, credit_amount: 15.0, status: 'pending')
       end
       let(:fee) do
         create(
@@ -56,7 +224,7 @@ RSpec.describe Invoices::UpdateService do
           fee_type: 'credit',
           invoiceable_type: 'WalletTransaction',
           invoiceable_id: wallet_transaction.id,
-          invoice: invoice,
+          invoice:
         )
       end
 
@@ -74,6 +242,47 @@ RSpec.describe Invoices::UpdateService do
       end
     end
 
+    context 'with payment_status update and notification is turned on' do
+      let(:webhook_notification) { true }
+
+      context 'when invoice is visible' do
+        it 'delivers a webhook' do
+          result
+
+          expect(SendWebhookJob).to have_been_enqueued.with(
+            'invoice.payment_status_updated',
+            invoice
+          )
+        end
+      end
+
+      context 'when invoice is invisible' do
+        before { invoice.update! status: :open }
+
+        it 'delivers a webhook' do
+          result
+
+          expect(SendWebhookJob).not_to have_been_enqueued.with(
+            'invoice.payment_status_updated',
+            invoice
+          )
+        end
+      end
+
+      context 'when payment status has not changed' do
+        let(:invoice) { create(:invoice, payment_status: :succeeded) }
+
+        it 'does not deliver a webhook' do
+          result
+
+          expect(SendWebhookJob).not_to have_been_enqueued.with(
+            'invoice.payment_status_updated',
+            invoice
+          )
+        end
+      end
+    end
+
     context 'when invoice does not exist' do
       let(:invoice) { nil }
 
@@ -86,22 +295,9 @@ RSpec.describe Invoices::UpdateService do
     context 'when invoice payment_status is invalid' do
       let(:update_args) do
         {
-          payment_status: 'Foo Bar',
+          payment_status: 'Foo Bar'
         }
       end
-
-      it 'returns an error' do
-        aggregate_failures do
-          expect(result).not_to be_success
-          expect(result.error).to be_a(BaseService::ValidationFailure)
-          expect(result.error.messages.keys).to include(:payment_status)
-          expect(result.error.messages[:payment_status]).to include('value_is_invalid')
-        end
-      end
-    end
-
-    context 'when invoice payment_status is not present' do
-      let(:update_args) { {} }
 
       it 'returns an error' do
         aggregate_failures do

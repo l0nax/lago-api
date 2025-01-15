@@ -11,7 +11,7 @@ RSpec.describe UsersService, type: :service do
       result = user_service.register('email', 'password', 'organization_name')
 
       expect(SegmentIdentifyJob).to have_received(:perform_later).with(
-        membership_id: "membership/#{result.membership.id}",
+        membership_id: "membership/#{result.membership.id}"
       )
     end
 
@@ -24,8 +24,8 @@ RSpec.describe UsersService, type: :service do
         event: 'organization_registered',
         properties: {
           organization_name: result.organization.name,
-          organization_id: result.organization.id,
-        },
+          organization_id: result.organization.id
+        }
       )
     end
 
@@ -33,8 +33,11 @@ RSpec.describe UsersService, type: :service do
       result = user_service.register('email', 'password', 'organization_name')
       expect(result.user).to be_present
       expect(result.membership).to be_present
-      expect(result.organization).to be_present
       expect(result.token).to be_present
+
+      expect(result.organization)
+        .to be_present
+        .and have_attributes(name: 'organization_name', document_numbering: 'per_organization')
     end
 
     context 'when user already exists' do
@@ -51,15 +54,57 @@ RSpec.describe UsersService, type: :service do
         end
       end
     end
+
+    context 'when signup is disabled' do
+      before do
+        ENV['LAGO_DISABLE_SIGNUP'] = 'true'
+      end
+
+      after do
+        ENV['LAGO_DISABLE_SIGNUP'] = nil
+      end
+
+      it 'returns a not allowed error' do
+        result = user_service.register('email', 'password', 'organization_name')
+
+        aggregate_failures do
+          expect(result).not_to be_success
+          expect(result.error.message).to eq('signup_disabled')
+        end
+      end
+    end
   end
 
   describe 'register_from_invite' do
-    it 'creates an organization, user and membership' do
-      result = user_service.register('email', 'password', 'organization_name')
-      expect(result.user).to be_present
-      expect(result.membership).to be_present
-      expect(result.organization).to be_present
-      expect(result.token).to be_present
+    let(:email) { Faker::Internet.email }
+
+    context 'when user already exists' do
+      it 'creates user and membership if user doesn\'t exist' do
+        create(:user, email:)
+        invite = create(:invite, email:)
+
+        result = user_service.register_from_invite(invite, nil)
+
+        expect(result.user).to be_persisted
+        expect(result.user.email).to eq email
+        expect(result.membership).to be_persisted
+        expect(result.organization).to eq invite.organization
+        expect(result.token).to be_present
+      end
+    end
+
+    context 'when user doesn\'t exist' do
+      it 'creates user and membership if user doesn\'t exist' do
+        invite = create(:invite, email:)
+
+        result = user_service.register_from_invite(invite, 'password')
+
+        expect(result.user).to be_persisted
+        expect(result.user.email).to eq email
+        expect(result.membership).to be_present
+        expect(result.organization).to eq invite.organization
+        expect(result.token).to be_present
+      end
     end
   end
 
@@ -71,7 +116,7 @@ RSpec.describe UsersService, type: :service do
       result = user_service.login(membership.user.email, membership.user.password)
 
       expect(SegmentIdentifyJob).to have_received(:perform_later).with(
-        membership_id: "membership/#{result.user.memberships.first.id}",
+        membership_id: "membership/#{result.user.memberships.first.id}"
       )
     end
   end

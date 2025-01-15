@@ -5,7 +5,7 @@ module Webhooks
     class PaymentProviderRefundFailureService < Webhooks::BaseService
       private
 
-      alias credit_note object
+      alias_method :credit_note, :object
 
       def current_organization
         @current_organization ||= credit_note.organization
@@ -16,7 +16,7 @@ module Webhooks
           credit_note,
           root_name: object_type,
           provider_error: options[:provider_error],
-          provider_customer_id: options[:provider_customer_id],
+          provider_customer_id: options[:provider_customer_id]
         )
       end
 

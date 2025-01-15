@@ -4,41 +4,51 @@ module Api
   module V1
     class EventsController < Api::BaseController
       def create
-        # NOTE: Properties validations will be returned on the debugger.
-        validate_result = Events::CreateService.new.validate_params(
+        result = ::Events::CreateService.call(
           organization: current_organization,
           params: create_params,
-        )
-        return render_error_response(validate_result) unless validate_result.success?
-
-        Events::CreateJob.perform_later(
-          current_organization,
-          create_params,
-          Time.zone.now.to_i,
-          event_metadata,
+          timestamp: Time.current.to_f,
+          metadata: event_metadata
         )
 
-        head(:ok)
+        if result.success?
+          render(
+            json: ::V1::EventSerializer.new(
+              result.event,
+              root_name: 'event'
+            )
+          )
+        else
+          render_error_response(result)
+        end
       end
 
       def batch
-        validate_result = Events::CreateBatchService.new.validate_params(params: batch_params)
-        return render_error_response(validate_result) unless validate_result.success?
-
-        Events::CreateBatchJob.perform_later(
-          current_organization,
-          batch_params,
-          Time.zone.now.to_i,
-          event_metadata,
+        result = ::Events::CreateBatchService.call(
+          organization: current_organization,
+          events_params: batch_params,
+          timestamp: Time.current.to_f,
+          metadata: event_metadata
         )
 
-        head(:ok)
+        if result.success?
+          render(
+            json: ::CollectionSerializer.new(
+              result.events,
+              ::V1::EventSerializer,
+              collection_name: 'events'
+            )
+          )
+        else
+          render_error_response(result)
+        end
       end
 
       def show
-        event = Event.find_by(
-          organization: current_organization,
-          transaction_id: params[:id],
+        event_scope = current_organization.clickhouse_events_store? ? Clickhouse::EventsRaw : Event
+        event = event_scope.find_by(
+          organization_id: current_organization.id,
+          transaction_id: params[:id]
         )
 
         return not_found_error(resource: 'event') unless event
@@ -46,9 +56,53 @@ module Api
         render(
           json: ::V1::EventSerializer.new(
             event,
-            root_name: 'event',
-          ),
+            root_name: 'event'
+          )
         )
+      end
+
+      def index
+        result = EventsQuery.call(
+          organization: current_organization,
+          pagination: {
+            page: params[:page],
+            limit: params[:per_page] || PER_PAGE
+          },
+          filters: index_filters
+        )
+
+        if result.success?
+          render(
+            json: ::CollectionSerializer.new(
+              result.events,
+              ::V1::EventSerializer,
+              collection_name: 'events',
+              meta: pagination_metadata(result.events)
+            )
+          )
+        else
+          render_error_response(result)
+        end
+      end
+
+      def estimate_fees
+        result = Fees::EstimatePayInAdvanceService.call(
+          organization: current_organization,
+          params: create_params
+        )
+
+        if result.success?
+          render(
+            json: ::CollectionSerializer.new(
+              result.fees,
+              ::V1::FeeSerializer,
+              collection_name: 'fees',
+              includes: %i[applied_taxes]
+            )
+          )
+        else
+          render_error_response(result)
+        end
       end
 
       private
@@ -58,32 +112,50 @@ module Api
           .require(:event)
           .permit(
             :transaction_id,
-            :external_customer_id,
             :code,
             :timestamp,
             :external_subscription_id,
-            properties: {},
+            :precise_total_amount_cents,
+            properties: {}
           )
       end
 
       def batch_params
         params
-          .require(:event)
           .permit(
-            :transaction_id,
-            :external_customer_id,
-            :code,
-            :timestamp,
-            external_subscription_ids: [],
-            properties: {},
-          )
+            events: [
+              :transaction_id,
+              :code,
+              :timestamp,
+              :external_subscription_id,
+              :precise_total_amount_cents,
+              properties: {} # rubocop:disable Style/HashAsLastArrayItem
+            ]
+          ).to_h.deep_symbolize_keys
+      end
+
+      def index_filters
+        params.permit(
+          :code,
+          :external_subscription_id,
+          :timestamp_from,
+          :timestamp_to
+        )
       end
 
       def event_metadata
         {
           user_agent: request.user_agent,
-          ip_address: request.remote_ip,
+          ip_address: request.remote_ip
         }
+      end
+
+      def track_api_key_usage?
+        action_name&.to_sym != :create
+      end
+
+      def resource_name
+        'event'
       end
     end
   end

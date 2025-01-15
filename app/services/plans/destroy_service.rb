@@ -11,13 +11,16 @@ module Plans
       return result.not_found_failure!(resource: 'plan') unless plan
 
       # NOTE: Terminate active subscriptions.
-      plan.subscriptions.active.each do |subscription|
+      plan.subscriptions.active.find_each do |subscription|
         Subscriptions::TerminateService.call(subscription:, async: false)
       end
 
+      # NOTE: Cancel pending subscription to make sure they won't be activated.
+      plan.subscriptions.pending.find_each(&:mark_as_canceled!)
+
       # NOTE: Finalize all draft invoices.
-      invoices = Invoice.draft.joins(:plans).where(plans: { id: plan.id }).distinct
-      invoices.each { |invoice| Invoices::FinalizeService.call(invoice:) }
+      invoices = Invoice.draft.joins(:plans).where(plans: {id: plan.id}).distinct
+      invoices.find_each { |invoice| Invoices::RefreshDraftAndFinalizeService.call(invoice:) }
 
       plan.pending_deletion = false
       plan.discard!
@@ -50,8 +53,8 @@ module Plans
           nb_percentage_charges: count_by_charge_model['percentage'] || 0,
           nb_graduated_charges: count_by_charge_model['graduated'] || 0,
           nb_package_charges: count_by_charge_model['package'] || 0,
-          organization_id: plan.organization_id,
-        },
+          organization_id: plan.organization_id
+        }
       )
     end
   end

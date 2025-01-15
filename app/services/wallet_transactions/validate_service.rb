@@ -6,9 +6,11 @@ module WalletTransactions
       valid_wallet?
       valid_paid_credits_amount? if args[:paid_credits]
       valid_granted_credits_amount? if args[:granted_credits]
+      valid_voided_credits_amount? if args[:voided_credits] && result.current_wallet
+      valid_metadata? if args[:metadata]
 
       if errors?
-        result.validation_failure!(errors: errors)
+        result.validation_failure!(errors:)
         return false
       end
 
@@ -38,6 +40,30 @@ module WalletTransactions
       return true if ::Validators::DecimalAmountService.new(args[:granted_credits]).valid_amount?
 
       add_error(field: :granted_credits, error_code: 'invalid_granted_credits')
+    end
+
+    def valid_voided_credits_amount?
+      unless ::Validators::DecimalAmountService.new(args[:voided_credits]).valid_amount?
+        return add_error(field: :voided_credits, error_code: 'invalid_voided_credits')
+      end
+
+      if BigDecimal(args[:voided_credits]) > result.current_wallet.credits_balance
+        return add_error(field: :voided_credits, error_code: 'insufficient_credits')
+      end
+
+      true
+    end
+
+    def valid_metadata?
+      validator = ::Validators::MetadataValidator.new(args[:metadata])
+      unless validator.valid?
+        validator.errors.each do |field, error_code|
+          add_error(field: field, error_code: error_code)
+        end
+        return false
+      end
+
+      true
     end
   end
 end

@@ -8,17 +8,19 @@ RSpec.describe Wallets::ValidateService, type: :service do
   let(:result) { BaseService::Result.new }
   let(:membership) { create(:membership) }
   let(:organization) { membership.organization }
-  let(:customer) { create(:customer, organization: organization) }
-  let(:subscription) { create(:subscription, customer: customer) }
+  let(:customer) { create(:customer, organization:) }
+  let(:subscription) { create(:subscription, customer:) }
   let(:customer_id) { customer.external_id }
   let(:paid_credits) { '1.00' }
   let(:granted_credits) { '0.00' }
+  let(:expiration_at) { (Time.current + 1.year).iso8601 }
   let(:args) do
     {
-      customer: customer,
+      customer:,
       organization_id: organization.id,
-      paid_credits: paid_credits,
-      granted_credits: granted_credits,
+      paid_credits:,
+      granted_credits:,
+      expiration_at:
     }
   end
 
@@ -34,8 +36,8 @@ RSpec.describe Wallets::ValidateService, type: :service do
         {
           customer: nil,
           organization_id: organization.id,
-          paid_credits: paid_credits,
-          granted_credits: granted_credits,
+          paid_credits:,
+          granted_credits:
         }
       end
 
@@ -46,7 +48,7 @@ RSpec.describe Wallets::ValidateService, type: :service do
     end
 
     context 'when customer already has a wallet' do
-      before { create(:wallet, customer: customer) }
+      before { create(:wallet, customer:) }
 
       it 'returns false and result has errors' do
         expect(validate_service).not_to be_valid
@@ -69,6 +71,82 @@ RSpec.describe Wallets::ValidateService, type: :service do
       it 'returns false and result has errors' do
         expect(validate_service).not_to be_valid
         expect(result.error.messages[:granted_credits]).to eq(['invalid_granted_credits'])
+      end
+    end
+
+    context 'with invalid expiration_at' do
+      context 'when string cannot be parsed to date' do
+        let(:expiration_at) { 'invalid' }
+
+        it 'returns false and result has errors' do
+          expect(validate_service).not_to be_valid
+          expect(result.error.messages[:expiration_at]).to eq(['invalid_date'])
+        end
+      end
+
+      context 'when expiration_at is integer' do
+        let(:expiration_at) { 123 }
+
+        it 'returns false and result has errors' do
+          expect(validate_service).not_to be_valid
+          expect(result.error.messages[:expiration_at]).to eq(['invalid_date'])
+        end
+      end
+
+      context 'when expiration_at is less than current time' do
+        let(:expiration_at) { (Time.current - 1.year).iso8601 }
+
+        it 'returns false and result has errors' do
+          expect(validate_service).not_to be_valid
+          expect(result.error.messages[:expiration_at]).to eq(['invalid_date'])
+        end
+      end
+
+      context 'with invalid transaction metadata' do
+        let(:args) do
+          {
+            customer:,
+            organization_id: organization.id,
+            paid_credits:,
+            granted_credits:,
+            expiration_at:,
+            transaction_metadata: [{key: "valid key", value1: "invalid value"}]
+          }
+        end
+
+        it 'returns false and result has errors' do
+          expect(validate_service).not_to be_valid
+          expect(result.error.messages[:metadata]).to eq(['invalid_key_value_pair'])
+        end
+      end
+    end
+
+    context 'with recurring transaction rules' do
+      let(:rules) do
+        [
+          {
+            trigger: 'interval',
+            interval: 'monthly'
+          },
+          {
+            trigger: 'threshold',
+            threshold_credits: '-1.0'
+          }
+        ]
+      end
+      let(:args) do
+        {
+          customer:,
+          organization_id: organization.id,
+          paid_credits:,
+          granted_credits:,
+          recurring_transaction_rules: rules
+        }
+      end
+
+      it 'returns false and result has errors' do
+        expect(validate_service).not_to be_valid
+        expect(result.error.messages[:recurring_transaction_rules]).to eq(['invalid_number_of_recurring_rules'])
       end
     end
   end

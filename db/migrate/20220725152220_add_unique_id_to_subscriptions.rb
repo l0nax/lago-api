@@ -1,11 +1,11 @@
+# frozen_string_literal: true
+
 class AddUniqueIdToSubscriptions < ActiveRecord::Migration[7.0]
   def up
     add_column :subscriptions, :unique_id, :string
-
-    LagoApi::Application.load_tasks
-    Rake::Task['subscriptions:fill_unique_id'].invoke
-
-    change_column_null :subscriptions, :unique_id, false
+    safety_assured do
+      change_column_null :subscriptions, :unique_id, false
+    end
   end
 
   def down

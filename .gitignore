@@ -22,6 +22,9 @@
 /tmp/storage/*
 !/tmp/storage/
 !/tmp/storage/.keep
+db/events_schema.rb
+db/clickhouse_schema.rb
+/config/master.key
 
 .env
 .byebug_history
@@ -33,3 +36,7 @@
 .rsa_private.pem
 .rsa_public.pem
 LAGO_VERSION
+
+**/.DS_Store
+.vscode
+.zed

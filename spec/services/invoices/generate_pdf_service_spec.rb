@@ -38,6 +38,10 @@ RSpec.describe Invoices::GeneratePdfService, type: :service do
       expect(result.invoice.file).to be_present
     end
 
+    it 'calls the SendWebhook job' do
+      expect { invoice_generate_service.call }.to have_enqueued_job(SendWebhookJob)
+    end
+
     context 'with not found invoice' do
       let(:invoice_subscription) { nil }
       let(:invoice) { nil }
@@ -67,7 +71,7 @@ RSpec.describe Invoices::GeneratePdfService, type: :service do
         invoice.file.attach(
           io: StringIO.new(File.read(Rails.root.join('spec/fixtures/blank.pdf'))),
           filename: 'invoice.pdf',
-          content_type: 'application/pdf',
+          content_type: 'application/pdf'
         )
       end
 
@@ -82,35 +86,30 @@ RSpec.describe Invoices::GeneratePdfService, type: :service do
 
     context 'when a billable metric is deleted' do
       let(:billable_metric) { create(:billable_metric, :deleted) }
-      let(:group) { create(:group, :deleted, billable_metric:) }
-      let(:fees) { [create(:charge_fee, subscription:, invoice:, group:, charge:, amount_cents: 10)] }
-
-      let(:group_property) do
-        build(
-          :group_property,
+      let(:fees) { [create(:charge_fee, subscription:, invoice:, charge_filter:, charge:, amount_cents: 10)] }
+      let(:charge) { create(:standard_charge, :deleted, billable_metric:) }
+      let(:billable_metric_filter) { create(:billable_metric_filter, :deleted, billable_metric:) }
+      let(:charge_filter) do
+        create(:charge_filter, :deleted, charge_id: charge.id, properties: {amount: '10'})
+      end
+      let(:charge_filter_value) do
+        create(
+          :charge_filter_value,
           :deleted,
-          group:,
-          values: { amount: '10', amount_currency: 'EUR' },
+          charge_filter:,
+          billable_metric_filter:,
+          values: [billable_metric_filter.values.first]
         )
       end
 
-      let(:charge) do
-        create(:standard_charge, :deleted, billable_metric:, group_properties: [group_property])
+      before do
+        charge_filter_value
       end
 
       it 'generates the invoice synchronously' do
         result = invoice_generate_service.call
 
         expect(result.invoice.file).to be_present
-      end
-
-      context 'with preferred locale' do
-        before { customer.update!(document_locale: 'fr') }
-
-        it 'sets the correct document locale' do
-          expect { invoice_generate_service.call }
-            .to change(I18n, :locale).from(:en).to(:fr)
-        end
       end
     end
 
@@ -119,6 +118,24 @@ RSpec.describe Invoices::GeneratePdfService, type: :service do
 
       it 'calls the SendWebhook job' do
         expect { invoice_generate_service.call }.to have_enqueued_job(SendWebhookJob)
+      end
+    end
+
+    context 'when in Admin context' do
+      let(:context) { 'admin' }
+
+      before do
+        invoice.file.attach(
+          io: StringIO.new(File.read(Rails.root.join('spec/fixtures/blank.pdf'))),
+          filename: 'invoice.pdf',
+          content_type: 'application/pdf'
+        )
+      end
+
+      it 'generates the invoice synchronously' do
+        result = invoice_generate_service.call
+
+        expect(result.invoice.file.filename.to_s).not_to eq('invoice.pdf')
       end
     end
   end

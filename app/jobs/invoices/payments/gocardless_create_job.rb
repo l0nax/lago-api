@@ -5,11 +5,12 @@ module Invoices
     class GocardlessCreateJob < ApplicationJob
       queue_as 'providers'
 
-      unique :until_executed
+      unique :until_executed, on_conflict: :log
 
       def perform(invoice)
-        result = Invoices::Payments::GocardlessService.new(invoice).create
-        result.raise_if_error!
+        # NOTE: Legacy job, kept only to avoid faileure with existing jobs
+
+        Invoices::Payments::CreateService.call!(invoice:, payment_provider: :gocardless)
       end
     end
   end

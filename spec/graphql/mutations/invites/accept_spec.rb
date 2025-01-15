@@ -23,7 +23,7 @@ RSpec.describe Mutations::Invites::Accept, type: :graphql do
 
   describe 'Invite revoke mutation' do
     context 'with a new user' do
-      let(:invite) { create(:invite, organization: organization) }
+      let(:invite) { create(:invite, organization:) }
 
       it 'accepts the invite ' do
         result = execute_graphql(
@@ -33,10 +33,10 @@ RSpec.describe Mutations::Invites::Accept, type: :graphql do
           variables: {
             input: {
               email: invite.email,
-              password: password,
-              token: invite.token,
-            },
-          },
+              password:,
+              token: invite.token
+            }
+          }
         )
 
         data = result['data']['acceptInvite']
@@ -47,7 +47,7 @@ RSpec.describe Mutations::Invites::Accept, type: :graphql do
     end
 
     context 'when invite is revoked' do
-      let(:invite) { create(:invite, organization: organization, status: :revoked) }
+      let(:invite) { create(:invite, organization:, status: :revoked) }
 
       it 'returns an error' do
         result = execute_graphql(
@@ -57,10 +57,10 @@ RSpec.describe Mutations::Invites::Accept, type: :graphql do
           variables: {
             input: {
               email: invite.email,
-              password: password,
-              token: invite.token,
-            },
-          },
+              password:,
+              token: invite.token
+            }
+          }
         )
 
         expect(result['errors'].first['extensions']['status']).to eq(404)
@@ -70,7 +70,7 @@ RSpec.describe Mutations::Invites::Accept, type: :graphql do
     end
 
     context 'when invite is already accepted' do
-      let(:invite) { create(:invite, organization: organization, status: :accepted) }
+      let(:invite) { create(:invite, organization:, status: :accepted) }
 
       it 'returns an error' do
         result = execute_graphql(
@@ -80,10 +80,10 @@ RSpec.describe Mutations::Invites::Accept, type: :graphql do
           variables: {
             input: {
               email: invite.email,
-              password: password,
-              token: invite.token,
-            },
-          },
+              password:,
+              token: invite.token
+            }
+          }
         )
 
         expect(result['errors'].first['extensions']['status']).to eq(404)

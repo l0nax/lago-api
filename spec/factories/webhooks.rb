@@ -2,10 +2,10 @@
 
 FactoryBot.define do
   factory :webhook do
-    organization
+    association :webhook_endpoint, factory: :webhook_endpoint
     association :object, factory: :invoice
 
-    payload { Faker::Json.shallow_json(width: 3) }
+    payload { Faker::Types.rb_hash(number: 3) }
     webhook_type { 'invoice.created' }
     endpoint { Faker::Internet.url }
 

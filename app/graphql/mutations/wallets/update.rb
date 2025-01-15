@@ -6,24 +6,18 @@ module Mutations
       include AuthenticableApiUser
       include RequiredOrganization
 
+      REQUIRED_PERMISSION = 'wallets:update'
+
       graphql_name 'UpdateCustomerWallet'
       description 'Updates a new Customer Wallet'
 
-      argument :id, ID, required: true
-      argument :name, String, required: false
-      argument :expiration_at, GraphQL::Types::ISO8601DateTime, required: false
+      input_object_class Types::Wallets::UpdateInput
 
       type Types::Wallets::Object
 
       def resolve(**args)
         wallet = context[:current_user].wallets.find_by(id: args[:id])
-
-        result = ::Wallets::UpdateService
-          .new(context[:current_user])
-          .update(
-            wallet: wallet,
-            args: args,
-          )
+        result = ::Wallets::UpdateService.call(wallet:, params: args)
 
         result.success? ? result.wallet : result_error(result)
       end

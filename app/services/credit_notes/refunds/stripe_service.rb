@@ -3,6 +3,8 @@
 module CreditNotes
   module Refunds
     class StripeService < BaseService
+      include Customers::PaymentProviderFinder
+
       def initialize(credit_note = nil)
         @credit_note = credit_note
 
@@ -16,19 +18,19 @@ module CreditNotes
         stripe_result = create_stripe_refund
 
         refund = Refund.new(
-          credit_note: credit_note,
-          payment: payment,
+          credit_note:,
+          payment:,
           payment_provider: payment.payment_provider,
           payment_provider_customer: payment.payment_provider_customer,
           amount_cents: stripe_result.amount,
           amount_currency: stripe_result.currency&.upcase,
           status: stripe_result.status,
-          provider_refund_id: stripe_result.id,
+          provider_refund_id: stripe_result.id
         )
         refund.save!
 
         update_credit_note_status(refund.status)
-        track_refund_status_changed(refund.status)
+        Utils::SegmentTrack.refund_status_changed(refund.status, credit_note.id, organization.id)
 
         result.refund = refund
         result
@@ -44,7 +46,7 @@ module CreditNotes
 
         refund.update!(status:)
         update_credit_note_status(status)
-        track_refund_status_changed(status)
+        Utils::SegmentTrack.refund_status_changed(refund.status, credit_note.id, organization.id)
 
         if status.to_sym == :failed
           deliver_error_webhook(message: 'Payment refund failed', code: nil)
@@ -63,8 +65,7 @@ module CreditNotes
       delegate :organization, :customer, :invoice, to: :credit_note
 
       def should_process_refund?
-        return false unless credit_note.refunded?
-        return false if credit_note.succeeded?
+        return false if !credit_note.refunded? || credit_note.succeeded? || invoice.payment_dispute_lost_at?
 
         payment.present?
       end
@@ -74,7 +75,7 @@ module CreditNotes
       end
 
       def stripe_api_key
-        organization.stripe_payment_provider.secret_key
+        stripe_payment_provider.secret_key
       end
 
       def create_stripe_refund
@@ -82,10 +83,10 @@ module CreditNotes
           stripe_refund_payload,
           {
             api_key: stripe_api_key,
-            idempotency_key: credit_note.id,
-          },
+            idempotency_key: credit_note.id
+          }
         )
-      rescue Stripe::InvalidRequestError => e
+      rescue ::Stripe::InvalidRequestError => e
         deliver_error_webhook(message: e.message, code: e.code)
         update_credit_note_status(:failed)
 
@@ -100,8 +101,8 @@ module CreditNotes
           metadata: {
             lago_customer_id: customer.id,
             lago_credit_note_id: credit_note.id,
-            lago_invoice_id: invoice.id,
-          },
+            lago_invoice_id: invoice.id
+          }
         }
       end
 
@@ -117,16 +118,14 @@ module CreditNotes
       end
 
       def deliver_error_webhook(message:, code:)
-        return unless organization.webhook_url?
-
         SendWebhookJob.perform_later(
           'credit_note.provider_refund_failure',
           credit_note,
           provider_customer_id: customer.stripe_customer.provider_customer_id,
           provider_error: {
-            message: message,
-            error_code: code,
-          },
+            message:,
+            error_code: code
+          }
         )
       end
 
@@ -134,18 +133,6 @@ module CreditNotes
         credit_note.refund_status = status
         credit_note.refunded_at = Time.current if credit_note.succeeded?
         credit_note.save!
-      end
-
-      def track_refund_status_changed(status)
-        SegmentTrackJob.perform_later(
-          membership_id: CurrentContext.membership,
-          event: 'refund_status_changed',
-          properties: {
-            organization_id: organization.id,
-            credit_note_id: credit_note.id,
-            refund_status: status,
-          },
-        )
       end
 
       def handle_missing_refund(metadata)
@@ -156,6 +143,10 @@ module CreditNotes
         return result unless Invoice.find_by(id: metadata[:lago_invoice_id])
 
         result.not_found_failure!(resource: 'stripe_refund')
+      end
+
+      def stripe_payment_provider
+        @stripe_payment_provider ||= payment_provider(customer)
       end
     end
   end
