@@ -5,8 +5,8 @@ module Api
     class CreditNotesController < Api::BaseController
       def create
         service = CreditNotes::CreateService.new(
-          invoice: current_organization.invoices.find_by(id: input_params[:invoice_id]),
-          **input_params,
+          invoice: current_organization.invoices.visible.find_by(id: input_params[:invoice_id]),
+          **input_params
         )
         result = service.call
 
@@ -14,9 +14,9 @@ module Api
           render(
             json: ::V1::CreditNoteSerializer.new(
               result.credit_note,
-              root_name: 'credit_note',
-              includes: %i[items],
-            ),
+              root_name: "credit_note",
+              includes: %i[items applied_taxes]
+            )
           )
         else
           render_error_response(result)
@@ -25,20 +25,20 @@ module Api
 
       def show
         credit_note = current_organization.credit_notes.finalized.find_by(id: params[:id])
-        return not_found_error(resource: 'credit_note') unless credit_note
+        return not_found_error(resource: "credit_note") unless credit_note
 
         render(
           json: ::V1::CreditNoteSerializer.new(
             credit_note,
-            root_name: 'credit_note',
-            includes: %i[items],
-          ),
+            root_name: "credit_note",
+            includes: %i[items applied_taxes error_details]
+          )
         )
       end
 
       def update
         credit_note = current_organization.credit_notes.find_by(id: params[:id])
-        return not_found_error(resource: 'credit_note') unless credit_note
+        return not_found_error(resource: "credit_note") unless credit_note
 
         result = CreditNotes::UpdateService.new(credit_note:, **update_params).call
 
@@ -46,9 +46,9 @@ module Api
           render(
             json: ::V1::CreditNoteSerializer.new(
               credit_note,
-              root_name: 'credit_note',
-              includes: %i[items],
-            ),
+              root_name: "credit_note",
+              includes: %i[items applied_taxes]
+            )
           )
         else
           render_error_response(result)
@@ -57,14 +57,14 @@ module Api
 
       def download
         credit_note = current_organization.credit_notes.finalized.find_by(id: params[:id])
-        return not_found_error(resource: 'credit_note') unless credit_note
+        return not_found_error(resource: "credit_note") unless credit_note
 
         if credit_note.file.present?
           return render(
             json: ::V1::CreditNoteSerializer.new(
               credit_note,
-              root_name: 'credit_note',
-            ),
+              root_name: "credit_note"
+            )
           )
         end
 
@@ -75,7 +75,7 @@ module Api
 
       def void
         credit_note = current_organization.credit_notes.find_by(id: params[:id])
-        return not_found_error(resource: 'credit_note') unless credit_note
+        return not_found_error(resource: "credit_note") unless credit_note
 
         result = CreditNotes::VoidService.new(credit_note:).call
 
@@ -83,9 +83,9 @@ module Api
           render(
             json: ::V1::CreditNoteSerializer.new(
               credit_note,
-              root_name: 'credit_note',
-              includes: %i[items],
-            ),
+              root_name: "credit_note",
+              includes: %i[items applied_taxes]
+            )
           )
         else
           render_error_response(result)
@@ -93,24 +93,59 @@ module Api
       end
 
       def index
-        credit_notes = current_organization.credit_notes.finalized
-
-        if params[:external_customer_id]
-          credit_notes = credit_notes.joins(:customer).where(customers: { external_id: params[:external_customer_id] })
-        end
-
-        credit_notes = credit_notes.order(created_at: :desc)
-          .page(params[:page])
-          .per(params[:per_page] || PER_PAGE)
-
-        render(
-          json: ::CollectionSerializer.new(
-            credit_notes,
-            ::V1::CreditNoteSerializer,
-            collection_name: 'credit_notes',
-            meta: pagination_metadata(credit_notes),
-          ),
+        result = CreditNotesQuery.call(
+          organization: current_organization,
+          pagination: {
+            page: params[:page],
+            limit: params[:per_page] || PER_PAGE
+          },
+          search_term: params[:search_term],
+          filters: {
+            amount_from: params[:amount_from],
+            amount_to: params[:amount_to],
+            credit_status: params[:credit_status],
+            currency: params[:currency],
+            customer_external_id: params[:external_customer_id],
+            invoice_number: params[:invoice_number],
+            issuing_date_from: (Date.strptime(params[:issuing_date_from]) if valid_date?(params[:issuing_date_from])),
+            issuing_date_to: (Date.strptime(params[:issuing_date_to]) if valid_date?(params[:issuing_date_to])),
+            reason: params[:reason],
+            refund_status: params[:refund_status],
+            self_billed: params[:self_billed]
+          }
         )
+
+        if result.success?
+          render(
+            json: ::CollectionSerializer.new(
+              result.credit_notes.includes(:items, :applied_taxes, :invoice),
+              ::V1::CreditNoteSerializer,
+              collection_name: "credit_notes",
+              meta: pagination_metadata(result.credit_notes),
+              includes: %i[items applied_taxes error_details]
+            )
+          )
+        else
+          render_error_response(result)
+        end
+      end
+
+      def estimate
+        result = CreditNotes::EstimateService.call(
+          invoice: current_organization.invoices.visible.find_by(id: estimate_params[:invoice_id]),
+          items: estimate_params[:items]
+        )
+
+        if result.success?
+          render(
+            json: ::V1::CreditNotes::EstimateSerializer.new(
+              result.credit_note,
+              root_name: "estimated_credit_note"
+            )
+          )
+        else
+          render_error_response(result)
+        end
       end
 
       private
@@ -125,13 +160,28 @@ module Api
             :refund_amount_cents,
             items: [
               :fee_id,
-              :amount_cents,
-            ],
+              :amount_cents
+            ]
           )
       end
 
       def update_params
         params.require(:credit_note).permit(:refund_status)
+      end
+
+      def estimate_params
+        @estimate_params ||= params.require(:credit_note)
+          .permit(
+            :invoice_id,
+            items: [
+              :fee_id,
+              :amount_cents
+            ]
+          )
+      end
+
+      def resource_name
+        "credit_note"
       end
     end
   end

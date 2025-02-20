@@ -1,43 +1,111 @@
+---
 fr:
   invoice:
-    document_name: Facture
-    invoice_number: Nº de facture
-    issue_date: Date d'émission
-    bill_from: De
-    bill_to: Facturé à
-    due_date: Date d'échéance le %{date}
-    total_credits_with_value: "Nombre total de crédits: %{credit_amount} crédits"
     all_subscriptions: Tous les abonnements
     all_usage_based_fees: Tous les frais de consommation
-    sub_total_without_tax: Sous total (HT)
-    tax: TVA
-    sub_total_with_tax: Sous total (TTC)
-    credit_notes: Avoir(s)
-    coupons: Réduction(s)
-    prepaid_credits: Crédit(s) prépayé(s)
-    prepaid_credits_with_value: Crédit(s) prépayé(s) - %{wallet_name}
-    total_due: Total dû
-    powered_by: Document généré par
-
-    details: "Détails de %{resource}"
-    subscription: Souscription
-    date_from: Du
-    date_to: au
-    monthly: mensuelle
-    yearly: annuelle
-    weekly: hebdomadaire
-    sub_total: Sous total
-    subscription_interval: Souscription %{plan_interval} - %{plan_name}
-
-    usage_based_fees: Frais de consommation
-    list_of_charges: Liste des frais de consommation du %{from} au %{to}
-    see_breakdown: Consultez le détails ci-après
-    total_unit_interval: "Nombre total d'unités: %{events_count} événement(s) pour %{units}"
-    total_unit: "Nombre total d'unités: %{units}"
-    total: Total
+    already_paid: Déjà payé
+    amount: Montant
+    amount_with_tax: Montant (TTC)
+    amount_without_tax: Montant (HT)
+    bill_from: De
+    bill_to: Facturé à
     breakdown: Détails de consommation
     breakdown_for_days: "%{breakdown_duration} sur %{breakdown_total_duration} jours"
-    breakdown_of: "Détails de consommation de %{fee_group_name}"
-    notice: Par exemple, si une unité est ajoutée alors qu'il reste 15 jours à votre abonnement mensuel et que le mois concerné compte 31 jours, nous multiplions le prix mensuel par 15/31 (nombre de jours restants dans le mois divisé par le nombre total de jours du mois), pour un abonnement mensuel. Le principe est similaire lorsque vous retirez une unité qui n'aura été utilisée que 10 jours dans le mois, nous multiplions le prix par 10/31.
-
+    breakdown_of: Détails de consommation de %{fee_filter_display_name}
+    coupons: Réduction(s)
+    credit_notes: Avoir(s)
+    date_from: Du
+    date_to: au
+    details: Détails de %{resource}
+    document_name: Facture
+    document_tax_name: Facture fiscale
+    due_date: Date d'échéance le %{date}
+    fee_prorated: Les frais sont calculés au prorata des jours d'utilisation, le prix unitaire affiché est une moyenne
+    fees_from_to_date: Frais de conso. du %{from_date} au %{to_date}
+    graduated:
+      fee_per_unit_for_the_first: Frais par unité pour les %{to} premières
+      fee_per_unit_for_the_last: Frais par unité pour %{from} et plus
+      fee_per_unit_for_the_next: Frais par unité pour les suivantes de %{from} à %{to}
+      flat_fee_for_the_first: Frais fixes pour les %{to} premières
+      flat_fee_for_the_last: Frais fixes pour %{from} et plus
+      flat_fee_for_the_next: Frais fixes pour les suivantes de %{from} à %{to}
+    invoice_number: Nº de facture
+    issue_date: Date d'émission
+    item: Article
+    list_of_charges: Liste des frais de consommation du %{from} au %{to}
+    month: mois
+    monthly: mensuel
+    notice_full: Peu importe quand l’évènement de consommation est reçu, l'unité n'est pas proratisée et nous facturons le prix complet.
+    notice_prorated: Si une unité est ajoutée ou supprimée pendant la période de facturation, nous calculons le prix au prorata en fonction du ratio des jours restants ou utilisés. Par exemple, s'il reste 15 jours dans le plan, nous multiplions le prix par 15/%{days_in_month}, et si une unité a été utilisée pendant 10 jours, nous multiplions le prix par 10/%{days_in_month}.
+    package:
+      fee_per_package: Frais par tranche
+      fee_per_package_unit_price: "%{amount} par tranche de %{package_size}"
+      free_units_for_the_first: Unités gratuites pour les premiers %{count}
+    paid_invoice: Facture payée
+    paid_tax_invoice: Facture fiscale payée
+    payment_term: Délai de paiement
+    payment_term_days: "%{net_payment_term} jours"
+    percentage:
+      adjustment_per_transaction: Ajustement pour min/max par transaction
+      fee_per_transaction: Frais fixes par transaction
+      free_units_per_transaction:
+        one: Unités gratuites pour 1 transaction
+        other: Unités gratuites pour %{count} transactions
+      percentage_rate_on_amount: Taux sur le montant
+    powered_by: Document généré par
+    prepaid_credit_invoice: Facture d'acompte
+    prepaid_credits: Crédit(s) prépayé(s)
+    prepaid_credits_with_value: Crédit(s) prépayé(s) - %{wallet_name}
+    progressive_billing_credit: Usage déjà facturé
+    quarter: trimestre
+    quarterly: trimestriellement
+    reached_usage_threshold: Cette facturation progressive est générée car votre usage cumulé a atteint %{usage_amount}, dépassant le seuil de %{threshold_amount}.
+    see_breakdown: Consultez le détail ci-après
+    self_billed:
+      document_name: Facture d'autofacturation
+      footer: Cette facture d'autofacturation a été émise par le client au nom du partenaire, avec son consentement. Le partenaire a accepté de ne pas établir sa propre facture pour cette transaction.
+    sub_total: Sous total
+    sub_total_with_tax: Sous total (TTC)
+    sub_total_without_tax: Sous total (HT)
+    subscription: Abonnement
+    subscription_interval: Abonnement %{plan_interval} - %{plan_name}
+    tax: TVA
+    tax_identification_number: 'ID fiscal: %{tax_identification_number}'
+    tax_name: "%{name} (%{rate}% sur %{amount})"
+    tax_name_only:
+      customer_exempt: Le client est exonéré de taxe
+      juris_has_no_tax: Taxe non applicable
+      juris_not_taxed: Taxe non applicable
+      not_collecting: Pas de taxe
+      reverse_charge: Autoliquidation - Responsabilité fiscale transférée au client
+      transaction_exempt: Le client est exonéré de taxe
+      unknown_taxation: Inconnu
+    tax_name_with_details: "%{name} (%{rate}%)"
+    tax_rate: Taux de taxe
+    taxes:
+      fr_tax_exempt: Le client est exonéré de taxe – art. 259-1 du CGI.
+      reverse_charge: Taxe soumise à autoliquidation.
+      tax_exempt: Le client est exonéré de taxe.
+    total: Total
     total_credits: Total crédits
+    total_credits_with_value: 'Nombre total de crédits: %{credit_amount} crédits'
+    total_due: Total dû
+    total_due_amount: Montant dû
+    total_events: 'Nombre total d''événements: %{count}'
+    total_paid_amount: Montant payé
+    total_unit: 'Nombre total d''unités: %{units}'
+    total_unit_interval: 'Nombre total d''unités: %{events_count} événement(s) pour %{units}'
+    true_up_details: Dépense minimale de %{min_amount} au prorata des jours d'utilisation
+    true_up_metric: "%{metric} - Frais d'ajustement"
+    unit: Unité
+    unit_price: Prix unitaire
+    units: Unités
+    units_prorated_per_period: Unités proratisées par seconde par %{period}
+    usage_based_fees: Frais de consommation
+    volume:
+      fee_per_unit: Frais par unité
+      flat_fee_for_all_units: Frais fixes pour toutes les unités
+    week: semaine
+    weekly: hebdomadaire
+    year: année
+    yearly: annuel

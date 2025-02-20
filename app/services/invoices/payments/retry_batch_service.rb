@@ -9,7 +9,7 @@ module Invoices
         super
       end
 
-      def call_later
+      def call_async
         Invoices::Payments::RetryAllJob.perform_later(organization_id:, invoice_ids: invoices.ids)
 
         result.invoices = invoices
@@ -19,7 +19,7 @@ module Invoices
 
       def call(invoice_ids)
         processed_invoices = []
-        Invoice.where(id: invoice_ids).each do |invoice|
+        Invoice.where(id: invoice_ids).find_each do |invoice|
           result = Invoices::Payments::RetryService.new(invoice:).call
 
           return result unless result.success?
@@ -42,7 +42,7 @@ module Invoices
         @invoices = begin
           invoices = organization.invoices.where(payment_status: %w[pending failed])
           invoices = invoices.where(ready_for_payment_processing: true)
-          invoices = invoices.where(status: 'finalized')
+          invoices = invoices.where(status: "finalized")
 
           invoices
         end

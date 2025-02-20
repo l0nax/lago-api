@@ -2,13 +2,15 @@
 
 module AddOns
   class DestroyService < BaseService
+    Result = BaseResult[:add_on]
+
     def initialize(add_on:)
       @add_on = add_on
       super
     end
 
     def call
-      return result.not_found_failure!(resource: 'add_on') unless add_on
+      return result.not_found_failure!(resource: "add_on") unless add_on
 
       add_on.discard!
 

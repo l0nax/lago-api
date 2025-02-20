@@ -13,11 +13,23 @@ module Subscriptions
         .joins(customer: :organization)
         .pending
         .where(previous_subscription: nil)
-        .where("DATE(#{Subscription.subscription_at_in_timezone_sql}) = ?", Time.zone.at(timestamp).to_date)
+        .where(
+          "DATE(subscriptions.subscription_at#{at_time_zone}) <= " \
+          "DATE(?#{at_time_zone})",
+          Time.zone.at(timestamp)
+        )
         .find_each do |subscription|
           subscription.mark_as_active!(Time.zone.at(timestamp))
 
-          BillSubscriptionJob.perform_later([subscription], timestamp) if subscription.plan.pay_in_advance?
+          if subscription.should_sync_hubspot_subscription?
+            Integrations::Aggregator::Subscriptions::Hubspot::UpdateJob.perform_later(subscription:)
+          end
+
+          SendWebhookJob.perform_later("subscription.started", subscription)
+
+          if subscription.plan.pay_in_advance? && !subscription.in_trial_period?
+            BillSubscriptionJob.perform_later([subscription], timestamp, invoicing_reason: :subscription_starting)
+          end
         end
     end
 

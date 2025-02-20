@@ -6,8 +6,10 @@ module Mutations
       include AuthenticableApiUser
       include RequiredOrganization
 
-      graphql_name 'TerminateCustomerWallet'
-      description 'Terminates a new Customer Wallet'
+      REQUIRED_PERMISSION = "wallets:terminate"
+
+      graphql_name "TerminateCustomerWallet"
+      description "Terminates a new Customer Wallet"
 
       argument :id, ID, required: true
 

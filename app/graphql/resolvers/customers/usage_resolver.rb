@@ -5,17 +5,22 @@ module Resolvers
     class UsageResolver < Resolvers::BaseResolver
       include AuthenticableApiUser
 
-      description 'Query the usage of the customer on the current billing period'
+      REQUIRED_PERMISSION = "customers:view"
+
+      description "Query the usage of the customer on the current billing period"
 
       argument :customer_id, type: ID, required: false
       argument :subscription_id, type: ID, required: true
 
-      type Types::Invoices::Usage, null: false
+      type Types::Customers::Usage::Current, null: false
 
       def resolve(customer_id:, subscription_id:)
-        result = Invoices::CustomerUsageService
-          .new(context[:current_user], customer_id: customer_id, subscription_id: subscription_id)
-          .usage
+        result = Invoices::CustomerUsageService.with_ids(
+          organization_id: context[:current_user].organization_ids,
+          customer_id:,
+          subscription_id:,
+          apply_taxes: false
+        ).call
 
         result.success? ? result.usage : result_error(result)
       end

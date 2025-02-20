@@ -16,28 +16,35 @@ module Invoices
           organization: customer.organization,
           customer:,
           issuing_date:,
+          payment_due_date:,
+          net_payment_term: customer.applicable_net_payment_term,
           invoice_type: :add_on,
           payment_status: :pending,
-          amount_currency: currency,
-          vat_amount_currency: currency,
-          credit_amount_currency: currency,
-          total_amount_currency: currency,
-          vat_rate: customer.applicable_vat_rate,
-          timezone: customer.applicable_timezone,
+          currency:,
+          timezone: customer.applicable_timezone
         )
 
         create_add_on_fee(invoice)
-
         compute_amounts(invoice)
+        Invoices::ApplyInvoiceCustomSectionsService.call(invoice:)
 
-        invoice.total_amount_cents = invoice.amount_cents + invoice.vat_amount_cents
         invoice.save!
 
-        track_invoice_created(invoice)
         result.invoice = invoice
       end
 
-      SendWebhookJob.perform_later('invoice.add_on_added', result.invoice) if should_deliver_webhook?
+      Utils::SegmentTrack.invoice_created(result.invoice)
+      SendWebhookJob.perform_later("invoice.add_on_added", result.invoice)
+      GeneratePdfAndNotifyJob.perform_later(invoice: result.invoice, email: should_deliver_email?)
+
+      if result.invoice.should_sync_invoice?
+        Integrations::Aggregator::Invoices::CreateJob.perform_later(invoice: result.invoice)
+      end
+
+      if result.invoice.should_sync_hubspot_invoice?
+        Integrations::Aggregator::Invoices::Hubspot::CreateJob.perform_later(invoice: result.invoice)
+      end
+
       create_payment(result.invoice)
 
       result
@@ -52,12 +59,18 @@ module Invoices
     delegate :customer, to: :applied_add_on
 
     def compute_amounts(invoice)
-      fee_amounts = invoice.fees.select(:amount_cents, :vat_amount_cents)
+      fee_amounts = invoice.fees.select(:amount_cents, :taxes_amount_cents)
 
-      invoice.amount_cents = fee_amounts.sum(&:amount_cents)
-      invoice.amount_currency = applied_add_on.amount_currency
-      invoice.vat_amount_cents = fee_amounts.sum(&:vat_amount_cents)
-      invoice.vat_amount_currency = applied_add_on.amount_currency
+      invoice.fees_amount_cents = fee_amounts.sum(&:amount_cents)
+      invoice.sub_total_excluding_taxes_amount_cents = invoice.fees_amount_cents
+
+      taxes_result = Invoices::ApplyTaxesService.call(invoice:)
+      taxes_result.raise_if_error!
+
+      invoice.sub_total_including_taxes_amount_cents = (
+        invoice.sub_total_excluding_taxes_amount_cents + invoice.taxes_amount_cents
+      )
+      invoice.total_amount_cents = invoice.sub_total_including_taxes_amount_cents
     end
 
     def create_add_on_fee(invoice)
@@ -66,29 +79,22 @@ module Invoices
       fee_result.raise_if_error!
     end
 
-    def should_deliver_webhook?
-      customer.organization.webhook_url?
-    end
-
     def create_payment(invoice)
-      Invoices::Payments::CreateService.new(invoice).call
-    end
-
-    def track_invoice_created(invoice)
-      SegmentTrackJob.perform_later(
-        membership_id: CurrentContext.membership,
-        event: 'invoice_created',
-        properties: {
-          organization_id: invoice.organization.id,
-          invoice_id: invoice.id,
-          invoice_type: invoice.invoice_type,
-        },
-      )
+      Invoices::Payments::CreateService.call_async(invoice:)
     end
 
     # NOTE: accounting date must be in customer timezone
     def issuing_date
       datetime.in_time_zone(customer.applicable_timezone).to_date
+    end
+
+    def payment_due_date
+      (issuing_date + customer.applicable_net_payment_term.days).to_date
+    end
+
+    def should_deliver_email?
+      License.premium? &&
+        customer.organization.email_settings.include?("invoice.finalized")
     end
   end
 end

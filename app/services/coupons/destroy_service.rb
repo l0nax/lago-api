@@ -8,13 +8,13 @@ module Coupons
     end
 
     def call
-      return result.not_found_failure!(resource: 'coupon') unless coupon
+      return result.not_found_failure!(resource: "coupon") unless coupon
 
       ActiveRecord::Base.transaction do
         coupon.discard!
-        coupon.coupon_plans.discard_all
+        coupon.coupon_targets.discard_all
 
-        coupon.applied_coupons.active.each do |applied_coupon|
+        coupon.applied_coupons.active.find_each do |applied_coupon|
           AppliedCoupons::TerminateService.call(applied_coupon:)
         end
       end

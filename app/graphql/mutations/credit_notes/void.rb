@@ -5,8 +5,10 @@ module Mutations
     class Void < BaseMutation
       include AuthenticableApiUser
 
-      graphql_name 'VoidCreditNote'
-      description 'Voids a Credit Note'
+      REQUIRED_PERMISSION = "credit_notes:void"
+
+      graphql_name "VoidCreditNote"
+      description "Voids a Credit Note"
 
       argument :id, ID, required: true
 
@@ -14,7 +16,7 @@ module Mutations
 
       def resolve(id:)
         result = ::CreditNotes::VoidService.new(
-          credit_note: context[:current_user].credit_notes.find_by(id:),
+          credit_note: context[:current_user].credit_notes.find_by(id:)
         ).call
 
         result.success? ? result.credit_note : result_error(result)

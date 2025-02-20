@@ -6,19 +6,18 @@ module Mutations
       include AuthenticableApiUser
       include RequiredOrganization
 
-      graphql_name 'CreateInvite'
-      description 'Creates a new Invite'
+      REQUIRED_PERMISSION = "organization:members:create"
+
+      graphql_name "CreateInvite"
+      description "Creates a new Invite"
 
       argument :email, String, required: true
+      argument :role, Types::Memberships::RoleEnum, required: true
 
       type Types::Invites::Object
 
       def resolve(**args)
-        validate_organization!
-
-        result = ::Invites::CreateService
-          .new(context[:current_user])
-          .call(**args.merge(current_organization: current_organization))
+        result = ::Invites::CreateService.call(args.merge(current_organization:))
 
         result.success? ? result.invite : result_error(result)
       end

@@ -6,17 +6,18 @@ module Mutations
       include AuthenticableApiUser
       include RequiredOrganization
 
-      graphql_name 'RevokeInvite'
-      description 'Revokes a invite'
+      REQUIRED_PERMISSION = "organization:members:delete"
+
+      graphql_name "RevokeInvite"
+      description "Revokes an invite"
 
       argument :id, ID, required: true
 
       type Types::Invites::Object
 
-      def resolve(**args)
-        result = ::Invites::RevokeService
-          .new(context[:current_user])
-          .call(**args.merge(current_organization: current_organization))
+      def resolve(id:)
+        invite = current_organization.invites.pending.find_by(id:, status: :pending)
+        result = ::Invites::RevokeService.call(invite)
 
         result.success? ? result.invite : result_error(result)
       end

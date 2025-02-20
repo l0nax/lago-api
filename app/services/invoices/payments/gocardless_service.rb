@@ -3,73 +3,35 @@
 module Invoices
   module Payments
     class GocardlessService < BaseService
-      PENDING_STATUSES = %w[pending_customer_approval pending_submission submitted confirmed]
-        .freeze
-      SUCCESS_STATUSES = %w[paid_out].freeze
-      FAILED_STATUSES = %w[cancelled customer_approval_denied failed charged_back].freeze
+      include Customers::PaymentProviderFinder
 
       def initialize(invoice = nil)
         @invoice = invoice
 
-        super(nil)
-      end
-
-      def create
-        result.invoice = invoice
-        return result unless should_process_payment?
-
-        unless invoice.total_amount_cents.positive?
-          update_invoice_payment_status(:succeeded)
-          return result
-        end
-
-        increment_payment_attempts
-
-        gocardless_result = create_gocardless_payment
-
-        payment = Payment.new(
-          invoice: invoice,
-          payment_provider_id: gocardless_payment_provider.id,
-          payment_provider_customer_id: customer.gocardless_customer.id,
-          amount_cents: gocardless_result.amount,
-          amount_currency: gocardless_result.currency&.upcase,
-          provider_payment_id: gocardless_result.id,
-          status: gocardless_result.status,
-        )
-        payment.save!
-
-        invoice_payment_status = invoice_payment_status(payment.status)
-        update_invoice_payment_status(invoice_payment_status)
-        handle_prepaid_credits(payment.invoice, invoice_payment_status)
-        track_payment_status_changed(payment.invoice)
-
-        result.payment = payment
-        result
+        super
       end
 
       def update_payment_status(provider_payment_id:, status:)
-        payment = Payment.find_by(provider_payment_id: provider_payment_id)
-        return result.not_found_failure!(resource: 'gocardless_payment') unless payment
+        payment = Payment.find_by(provider_payment_id:)
+        return result.not_found_failure!(resource: "gocardless_payment") unless payment
 
         result.payment = payment
-        result.invoice = payment.invoice
-        return result if payment.invoice.succeeded?
+        result.invoice = payment.payable
+        return result if payment.payable.payment_succeeded?
 
-        payment.update!(status: status)
+        payment.status = status
 
-        invoice_payment_status = invoice_payment_status(status)
-        payment.invoice.update!(
-          payment_status: invoice_payment_status,
-          ready_for_payment_processing: invoice_payment_status != 'succeeded',
-        )
-        handle_prepaid_credits(payment.invoice, invoice_payment_status)
+        payable_payment_status = payment.payment_provider&.determine_payment_status(payment.status)
+        payment.payable_payment_status = payable_payment_status
+        payment.save!
 
-        SendWebhookJob.perform_later('invoice.payment_status_updated', payment.invoice)
-        track_payment_status_changed(payment.invoice)
+        update_invoice_payment_status(payment_status: payable_payment_status)
 
         result
-      rescue ArgumentError
-        result.single_validation_failure!(field: :payment_status, error_code: 'value_is_invalid')
+      rescue ActiveRecord::RecordInvalid => e
+        result.record_validation_failure!(record: e.record)
+      rescue BaseService::FailedResult => e
+        result.fail_with_error!(e)
       end
 
       private
@@ -78,118 +40,23 @@ module Invoices
 
       delegate :organization, :customer, to: :invoice
 
-      def should_process_payment?
-        return false if invoice.succeeded?
-        return false if gocardless_payment_provider.blank?
-
-        customer&.gocardless_customer&.provider_customer_id
-      end
-
-      def client
-        @client ||= GoCardlessPro::Client.new(
-          access_token: gocardless_payment_provider.access_token,
-          environment: gocardless_payment_provider.environment,
-        )
-      end
-
-      def gocardless_payment_provider
-        @gocardless_payment_provider ||= organization.gocardless_payment_provider
-      end
-
-      def mandate_id
-        result = client.mandates.list(
-          params: {
-            customer: customer.gocardless_customer.provider_customer_id,
-            status: %w[pending_customer_approval pending_submission submitted active],
-          },
-        )
-
-        mandate = result&.records&.first
-
-        customer.gocardless_customer.provider_mandate_id = mandate&.id
-        customer.gocardless_customer.save!
-
-        mandate&.id
-      end
-
-      def create_gocardless_payment
-        client.payments.create(
-          params: {
-            amount: invoice.total_amount_cents,
-            currency: invoice.total_amount_currency.upcase,
-            retry_if_possible: false,
-            metadata: {
-              lago_customer_id: customer.id,
-              lago_invoice_id: invoice.id,
-              invoice_issuing_date: invoice.issuing_date.iso8601,
-            },
-            links: {
-              mandate: mandate_id,
-            },
-          },
-          headers: {
-            'Idempotency-Key' => "#{invoice.id}/#{invoice.payment_attempts}",
-          },
-        )
-      rescue GoCardlessPro::Error => e
-        deliver_error_webhook(e)
-        update_invoice_payment_status(:failed)
-
-        raise
-      end
-
-      def invoice_payment_status(payment_status)
-        return 'pending' if PENDING_STATUSES.include?(payment_status)
-        return 'succeeded' if SUCCESS_STATUSES.include?(payment_status)
-        return 'failed' if FAILED_STATUSES.include?(payment_status)
-
-        payment_status
-      end
-
-      def update_invoice_payment_status(payment_status)
-        return unless Invoice::PAYMENT_STATUS.include?(payment_status&.to_sym)
-
-        invoice.update!(
+      def update_invoice_payment_status(payment_status:, deliver_webhook: true)
+        params = {
           payment_status:,
-          ready_for_payment_processing: payment_status.to_s == 'failed',
+          ready_for_payment_processing: payment_status.to_sym != :succeeded
+        }
+
+        if payment_status.to_sym == :succeeded
+          total_paid_amount_cents = result.invoice.payments.where(payable_payment_status: :succeeded).sum(:amount_cents)
+          params[:total_paid_amount_cents] = total_paid_amount_cents
+        end
+
+        update_invoice_result = Invoices::UpdateService.call(
+          invoice: result.invoice,
+          params:,
+          webhook_notification: deliver_webhook
         )
-      end
-
-      def increment_payment_attempts
-        invoice.update!(payment_attempts: invoice.payment_attempts + 1)
-      end
-
-      def handle_prepaid_credits(invoice, invoice_payment_status)
-        return unless invoice.invoice_type == 'credit'
-        return unless invoice_payment_status == 'succeeded'
-
-        Invoices::PrepaidCreditJob.perform_later(invoice)
-      end
-
-      def deliver_error_webhook(gocardless_error)
-        return unless invoice.organization.webhook_url?
-
-        SendWebhookJob.perform_later(
-          'invoice.payment_failure',
-          invoice,
-          provider_customer_id: customer.gocardless_customer.provider_customer_id,
-          provider_error: {
-            message: gocardless_error.message,
-            error_code: gocardless_error.code,
-          },
-        )
-      end
-
-      def track_payment_status_changed(invoice)
-        SegmentTrackJob.perform_later(
-          membership_id: CurrentContext.membership,
-          event: 'payment_status_changed',
-          properties: {
-            organization_id: invoice.organization.id,
-            invoice_id: invoice.id,
-            payment_status: invoice.payment_status,
-          },
-        )
+        update_invoice_result.raise_if_error!
       end
     end
   end

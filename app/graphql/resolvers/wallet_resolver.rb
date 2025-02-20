@@ -5,18 +5,16 @@ module Resolvers
     include AuthenticableApiUser
     include RequiredOrganization
 
-    description 'Query a single wallet'
+    description "Query a single wallet of an organization"
 
-    argument :id, ID, required: true, description: 'Uniq ID of the wallet'
+    argument :id, ID, required: true, description: "Uniq ID of the wallet"
 
-    type Types::Wallets::SingleObject, null: true
+    type Types::Wallets::Object, null: true
 
-    def resolve(id: nil)
-      validate_organization!
-
-      Wallet.find(id)
+    def resolve(id:)
+      current_organization.wallets.find(id)
     rescue ActiveRecord::RecordNotFound
-      not_found_error(resource: 'wallet')
+      not_found_error(resource: "wallet")
     end
   end
 end

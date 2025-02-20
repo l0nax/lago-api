@@ -2,10 +2,14 @@
 
 class AddSlugToCustomers < ActiveRecord::Migration[7.0]
   def change
-    add_column :customers, :slug, :string
-    add_column :customers, :sequential_id, :bigint
+    safety_assured do
+      change_table :customers, bulk: true do |t|
+        t.string :slug
+        t.bigint :sequential_id
+      end
+    end
 
     LagoApi::Application.load_tasks
-    Rake::Task['customers:generate_slug'].invoke
+    Rake::Task["customers:generate_slug"].invoke
   end
 end
