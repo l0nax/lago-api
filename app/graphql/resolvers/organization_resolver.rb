@@ -5,12 +5,11 @@ module Resolvers
     include AuthenticableApiUser
     include RequiredOrganization
 
-    description 'Query the current organization'
+    description "Query the current organization"
 
-    type Types::OrganizationType, null: true
+    type Types::Organizations::CurrentOrganizationType, null: true
 
     def resolve
-      validate_organization!
       current_organization
     end
   end

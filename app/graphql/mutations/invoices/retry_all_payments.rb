@@ -6,17 +6,17 @@ module Mutations
       include AuthenticableApiUser
       include RequiredOrganization
 
-      graphql_name 'RetryAllInvoicePayments'
-      description 'Retry all invoice payments'
+      REQUIRED_PERMISSION = "invoices:update"
+
+      graphql_name "RetryAllInvoicePayments"
+      description "Retry all invoice payments"
 
       type Types::Invoices::Object.collection_type
 
       def resolve
-        validate_organization!
+        result = ::Invoices::Payments::RetryBatchService.new(organization_id: current_organization.id).call_async
 
-        result = ::Invoices::Payments::RetryBatchService.new(organization_id: current_organization.id).call_later
-
-        result.success? ? result.invoices : result_error(result)
+        result.success? ? Kaminari.paginate_array(result.invoices) : result_error(result)
       end
     end
   end

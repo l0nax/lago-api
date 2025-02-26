@@ -7,11 +7,12 @@ module V1
         lago_id: model.id,
         lago_coupon_id: model.coupon.id,
         coupon_code: model.coupon.code,
+        coupon_name: model.coupon.name,
         lago_customer_id: model.customer.id,
         external_customer_id: model.customer.external_id,
         status: model.status,
         amount_cents: model.amount_cents,
-        amount_cents_remaining: amount_cents_remaining,
+        amount_cents_remaining:,
         amount_currency: model.amount_currency,
         percentage_rate: model.percentage_rate,
         frequency: model.frequency,
@@ -19,10 +20,9 @@ module V1
         frequency_duration_remaining: model.frequency_duration_remaining,
         expiration_at: model.coupon.expiration_at&.iso8601,
         created_at: model.created_at.iso8601,
-        terminated_at: model.terminated_at&.iso8601,
+        terminated_at: model.terminated_at&.iso8601
       }
 
-      payload = payload.merge(legacy_values)
       payload = payload.merge(credits) if include?(:credits)
 
       payload
@@ -38,13 +38,7 @@ module V1
     end
 
     def credits
-      ::CollectionSerializer.new(model.credits, ::V1::CreditSerializer, collection_name: 'credits').serialize
-    end
-
-    def legacy_values
-      ::V1::Legacy::AppliedCouponSerializer.new(
-        model,
-      ).serialize
+      ::CollectionSerializer.new(model.credits, ::V1::CreditSerializer, collection_name: "credits").serialize
     end
   end
 end

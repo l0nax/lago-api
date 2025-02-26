@@ -5,21 +5,28 @@ module Mutations
     class Update < BaseMutation
       include AuthenticableApiUser
 
-      graphql_name 'UpdatePlan'
-      description 'Updates an existing Plan'
+      REQUIRED_PERMISSION = "plans:update"
 
-      argument :id, String, required: true
-      argument :name, String, required: true
-      argument :code, String, required: true
-      argument :interval, Types::Plans::IntervalEnum, required: true
-      argument :pay_in_advance, Boolean, required: true
+      graphql_name "UpdatePlan"
+      description "Updates an existing Plan"
+
       argument :amount_cents, GraphQL::Types::BigInt, required: true
       argument :amount_currency, Types::CurrencyEnum, required: true
-      argument :trial_period, Float, required: false
-      argument :description, String, required: false
       argument :bill_charges_monthly, Boolean, required: false
+      argument :cascade_updates, Boolean, required: false
+      argument :code, String, required: true
+      argument :description, String, required: false
+      argument :id, String, required: true
+      argument :interval, Types::Plans::IntervalEnum, required: true
+      argument :invoice_display_name, String, required: false
+      argument :name, String, required: true
+      argument :pay_in_advance, Boolean, required: true
+      argument :tax_codes, [String], required: false
+      argument :trial_period, Float, required: false
 
       argument :charges, [Types::Charges::Input]
+      argument :minimum_commitment, Types::Commitments::Input, required: false
+      argument :usage_thresholds, [Types::UsageThresholds::Input], required: false
 
       type Types::Plans::Object
 

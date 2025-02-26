@@ -1,14 +1,17 @@
 # frozen_string_literal: true
 
-require 'rails_helper'
+require "rails_helper"
 
-describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
+describe "Terminate Pay in Advance Scenarios", :scenarios, type: :request do
   let(:organization) { create(:organization, webhook_url: nil) }
   let(:customer) { create(:customer, organization:) }
+  let(:tax) { create(:tax, organization:, rate: 20) }
   let(:plan) { create(:plan, pay_in_advance: true, organization:, amount_cents: 5000) }
   let(:metric) { create(:billable_metric, organization:) }
 
-  it 'creates expected credit note and invoice' do
+  before { tax }
+
+  it "creates expected credit note and invoice" do
     ### 8 Feb: Create and terminate subscription
     feb8 = DateTime.new(2023, 2, 8)
 
@@ -18,8 +21,8 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
           {
             external_customer_id: customer.external_id,
             external_id: customer.external_id,
-            plan_code: plan.code,
-          },
+            plan_code: plan.code
+          }
         )
       }.to change(Invoice, :count).by(1)
 
@@ -29,7 +32,7 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
 
       expect {
         terminate_subscription(subscription)
-      }.to change { subscription.reload.status }.from('active').to('terminated')
+      }.to change { subscription.reload.status }.from("active").to("terminated")
         .and change { subscription.invoices.count }.from(1).to(2)
         .and change { sub_invoice.reload.credit_notes.count }.from(0).to(1)
 
@@ -41,10 +44,10 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
     end
   end
 
-  context 'when customer is in UTC+ timezone' do
-    let(:customer) { create(:customer, organization:, timezone: 'Asia/Tokyo') }
+  context "when customer is in UTC+ timezone" do
+    let(:customer) { create(:customer, organization:, timezone: "Asia/Tokyo") }
 
-    it 'creates expected credit note and invoice' do
+    it "creates expected credit note and invoice" do
       ### 8 Feb: Create and terminate subscription
       feb8 = DateTime.new(2023, 2, 8)
 
@@ -54,8 +57,8 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
             {
               external_customer_id: customer.external_id,
               external_id: customer.external_id,
-              plan_code: plan.code,
-            },
+              plan_code: plan.code
+            }
           )
         }.to change(Invoice, :count).by(1)
 
@@ -65,7 +68,7 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
 
         expect {
           terminate_subscription(subscription)
-        }.to change { subscription.reload.status }.from('active').to('terminated')
+        }.to change { subscription.reload.status }.from("active").to("terminated")
           .and change { subscription.invoices.count }.from(1).to(2)
           .and change { sub_invoice.reload.credit_notes.count }.from(0).to(1)
 
@@ -78,10 +81,10 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
     end
   end
 
-  context 'when customer is in UTC- timezone' do
-    let(:customer) { create(:customer, organization:, timezone: 'America/Los_Angeles') }
+  context "when customer is in UTC- timezone" do
+    let(:customer) { create(:customer, organization:, timezone: "America/Los_Angeles") }
 
-    it 'creates expected credit note and invoice' do
+    it "creates expected credit note and invoice" do
       ### 8 Feb: Create and terminate subscription
       feb8 = DateTime.new(2023, 2, 8)
 
@@ -91,8 +94,8 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
             {
               external_customer_id: customer.external_id,
               external_id: customer.external_id,
-              plan_code: plan.code,
-            },
+              plan_code: plan.code
+            }
           )
         }.to change(Invoice, :count).by(1)
 
@@ -102,7 +105,7 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
 
         expect {
           terminate_subscription(subscription)
-        }.to change { subscription.reload.status }.from('active').to('terminated')
+        }.to change { subscription.reload.status }.from("active").to("terminated")
           .and change { subscription.invoices.count }.from(1).to(2)
           .and change { sub_invoice.reload.credit_notes.count }.from(0).to(1)
 
@@ -115,8 +118,8 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
     end
   end
 
-  context 'when subscription billing is anniversary' do
-    it 'creates expected credit note and invoice' do
+  context "when subscription billing is anniversary" do
+    it "creates expected credit note and invoice" do
       ### 8 Feb: Create and terminate subscription
       feb8 = DateTime.new(2023, 2, 8)
 
@@ -127,8 +130,8 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
               external_customer_id: customer.external_id,
               external_id: customer.external_id,
               plan_code: plan.code,
-              billing_time: 'anniversary',
-            },
+              billing_time: "anniversary"
+            }
           )
         }.to change(Invoice, :count).by(1)
 
@@ -138,7 +141,7 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
 
         expect {
           terminate_subscription(subscription)
-        }.to change { subscription.reload.status }.from('active').to('terminated')
+        }.to change { subscription.reload.status }.from("active").to("terminated")
           .and change { subscription.invoices.count }.from(1).to(2)
           .and change { sub_invoice.reload.credit_notes.count }.from(0).to(1)
 
@@ -150,10 +153,10 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
       end
     end
 
-    context 'when customer is in UTC+ timezone' do
-      let(:customer) { create(:customer, organization:, timezone: 'Asia/Tokyo') }
+    context "when customer is in UTC+ timezone" do
+      let(:customer) { create(:customer, organization:, timezone: "Asia/Tokyo") }
 
-      it 'creates expected credit note and invoice' do
+      it "creates expected credit note and invoice" do
         ### 8 Feb: Create and terminate subscription
         feb8 = DateTime.new(2023, 2, 8)
 
@@ -164,8 +167,8 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
                 external_customer_id: customer.external_id,
                 external_id: customer.external_id,
                 plan_code: plan.code,
-                billing_time: 'anniversary',
-              },
+                billing_time: "anniversary"
+              }
             )
           }.to change(Invoice, :count).by(1)
 
@@ -175,7 +178,7 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
 
           expect {
             terminate_subscription(subscription)
-          }.to change { subscription.reload.status }.from('active').to('terminated')
+          }.to change { subscription.reload.status }.from("active").to("terminated")
             .and change { subscription.invoices.count }.from(1).to(2)
             .and change { sub_invoice.reload.credit_notes.count }.from(0).to(1)
 
@@ -188,10 +191,10 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
       end
     end
 
-    context 'when customer is in UTC- timezone' do
-      let(:customer) { create(:customer, organization:, timezone: 'America/Los_Angeles') }
+    context "when customer is in UTC- timezone" do
+      let(:customer) { create(:customer, organization:, timezone: "America/Los_Angeles") }
 
-      it 'creates expected credit note and invoice' do
+      it "creates expected credit note and invoice" do
         ### 8 Feb: Create and terminate subscription
         feb8 = DateTime.new(2023, 2, 8)
 
@@ -202,8 +205,8 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
                 external_customer_id: customer.external_id,
                 external_id: customer.external_id,
                 plan_code: plan.code,
-                billing_time: 'anniversary',
-              },
+                billing_time: "anniversary"
+              }
             )
           }.to change(Invoice, :count).by(1)
 
@@ -213,7 +216,7 @@ describe 'Terminate Pay in Advance Scenarios', :scenarios, type: :request do
 
           expect {
             terminate_subscription(subscription)
-          }.to change { subscription.reload.status }.from('active').to('terminated')
+          }.to change { subscription.reload.status }.from("active").to("terminated")
             .and change { subscription.invoices.count }.from(1).to(2)
             .and change { sub_invoice.reload.credit_notes.count }.from(0).to(1)
 

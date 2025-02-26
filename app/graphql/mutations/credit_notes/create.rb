@@ -6,12 +6,14 @@ module Mutations
       include AuthenticableApiUser
       include RequiredOrganization
 
-      graphql_name 'CreateCreditNote'
-      description 'Creates a new Credit Note'
+      REQUIRED_PERMISSION = "credit_notes:create"
 
-      argument :reason, Types::CreditNotes::ReasonTypeEnum, required: true
-      argument :invoice_id, ID, required: true
+      graphql_name "CreateCreditNote"
+      description "Creates a new Credit Note"
+
       argument :description, String, required: false
+      argument :invoice_id, ID, required: true
+      argument :reason, Types::CreditNotes::ReasonTypeEnum, required: true
 
       argument :credit_amount_cents, GraphQL::Types::BigInt, required: false
       argument :refund_amount_cents, GraphQL::Types::BigInt, required: false
@@ -21,13 +23,12 @@ module Mutations
       type Types::CreditNotes::Object
 
       def resolve(**args)
-        validate_organization!
         args[:items].map!(&:to_h)
 
         result = ::CreditNotes::CreateService
           .new(
-            invoice: current_organization.invoices.find_by(id: args[:invoice_id]),
-            **args,
+            invoice: current_organization.invoices.visible.find_by(id: args[:invoice_id]),
+            **args
           )
           .call
 

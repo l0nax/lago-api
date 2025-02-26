@@ -2,6 +2,8 @@
 
 module PaymentProviderCustomers
   class GocardlessService < BaseService
+    include Customers::PaymentProviderFinder
+
     def initialize(gocardless_customer = nil)
       @gocardless_customer = gocardless_customer
 
@@ -15,7 +17,7 @@ module PaymentProviderCustomers
       gocardless_result = create_gocardless_customer
 
       gocardless_customer.update!(
-        provider_customer_id: gocardless_result.id,
+        provider_customer_id: gocardless_result.id
       )
 
       deliver_success_webhook
@@ -25,17 +27,24 @@ module PaymentProviderCustomers
       result
     end
 
-    def generate_checkout_url
+    def update
+      result
+    end
+
+    def generate_checkout_url(send_webhook: true)
       billing_request = create_billing_request(gocardless_customer.provider_customer_id)
       billing_request_flow = create_billing_request_flow(billing_request.id)
 
-      SendWebhookJob.perform_later(
-        'customer.checkout_url_generated',
-        customer,
-        checkout_url: billing_request_flow.authorisation_url,
-      )
-
       result.checkout_url = billing_request_flow.authorisation_url
+
+      if send_webhook
+        SendWebhookJob.perform_later(
+          "customer.checkout_url_generated",
+          customer,
+          checkout_url: result.checkout_url
+        )
+      end
+
       result
     end
 
@@ -50,23 +59,25 @@ module PaymentProviderCustomers
     end
 
     def gocardless_payment_provider
-      @gocardless_payment_provider || organization.gocardless_payment_provider
+      @gocardless_payment_provider ||= payment_provider(customer)
     end
 
     def client
       @client || GoCardlessPro::Client.new(
         access_token: gocardless_payment_provider.access_token,
-        environment: gocardless_payment_provider.environment,
+        environment: gocardless_payment_provider.environment
       )
     end
 
     def create_gocardless_customer
-      client.customers.create(
-        params: {
-          email: customer.email,
-          company_name: customer.name,
-        },
-      )
+      customer_params = {
+        email: customer.email&.strip&.split(",")&.first,
+        company_name: customer.name.presence,
+        given_name: customer.firstname.presence,
+        family_name: customer.lastname.presence
+      }.compact
+
+      client.customers.create(params: customer_params)
     rescue GoCardlessPro::Error => e
       deliver_error_webhook(e)
 
@@ -74,24 +85,20 @@ module PaymentProviderCustomers
     end
 
     def deliver_success_webhook
-      return unless organization.webhook_url?
-
       SendWebhookJob.perform_later(
-        'customer.payment_provider_created',
-        customer,
+        "customer.payment_provider_created",
+        customer
       )
     end
 
     def deliver_error_webhook(gocardless_error)
-      return unless organization.webhook_url?
-
       SendWebhookJob.perform_later(
-        'customer.payment_provider_error',
+        "customer.payment_provider_error",
         customer,
         provider_error: {
           message: gocardless_error.message,
-          error_code: gocardless_error.code,
-        },
+          error_code: gocardless_error.code
+        }
       )
     end
 
@@ -99,12 +106,12 @@ module PaymentProviderCustomers
       client.billing_requests.create(
         params: {
           mandate_request: {
-            scheme: 'bacs',
+            scheme: "bacs"
           },
           links: {
-            customer: gocardless_customer_id,
-          },
-        },
+            customer: gocardless_customer_id
+          }
+        }
       )
     rescue GoCardlessPro::Error => e
       deliver_error_webhook(e)
@@ -115,17 +122,22 @@ module PaymentProviderCustomers
     def create_billing_request_flow(billing_request_id)
       client.billing_request_flows.create(
         params: {
-          redirect_uri: PaymentProviders::GocardlessProvider::BILLING_REQUEST_REDIRECT_URL,
-          exit_uri: PaymentProviders::GocardlessProvider::BILLING_REQUEST_REDIRECT_URL,
+          redirect_uri: success_redirect_url,
+          exit_uri: success_redirect_url,
           links: {
-            billing_request: billing_request_id,
-          },
-        },
+            billing_request: billing_request_id
+          }
+        }
       )
     rescue GoCardlessPro::Error => e
       deliver_error_webhook(e)
 
       raise
+    end
+
+    def success_redirect_url
+      gocardless_payment_provider.success_redirect_url.presence ||
+        PaymentProviders::GocardlessProvider::SUCCESS_REDIRECT_URL
     end
   end
 end

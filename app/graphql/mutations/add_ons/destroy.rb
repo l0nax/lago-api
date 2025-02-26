@@ -5,8 +5,10 @@ module Mutations
     class Destroy < BaseMutation
       include AuthenticableApiUser
 
-      graphql_name 'DestroyAddOn'
-      description 'Deletes an add-on'
+      REQUIRED_PERMISSION = "addons:delete"
+
+      graphql_name "DestroyAddOn"
+      description "Deletes an add-on"
 
       argument :id, ID, required: true
 

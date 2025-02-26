@@ -1,13 +1,14 @@
 # frozen_string_literal: true
 
-require 'rails_helper'
+require "rails_helper"
 
 RSpec.describe Resolvers::CouponResolver, type: :graphql do
+  let(:required_permission) { "coupons:view" }
   let(:query) do
     <<~GQL
       query($couponId: ID!) {
         coupon(id: $couponId) {
-          id name customerCount appliedCouponsCount expirationAt
+          id name description customersCount appliedCouponsCount expirationAt
         }
       }
     GQL
@@ -28,45 +29,40 @@ RSpec.describe Resolvers::CouponResolver, type: :graphql do
     end
   end
 
-  it 'returns a single coupon' do
+  it_behaves_like "requires current user"
+  it_behaves_like "requires current organization"
+  it_behaves_like "requires permission", "coupons:view"
+
+  it "returns a single coupon" do
     result = execute_graphql(
       current_user: membership.user,
       current_organization: organization,
+      permissions: required_permission,
       query:,
-      variables: { couponId: coupon.id },
+      variables: {couponId: coupon.id}
     )
 
-    coupon_response = result['data']['coupon']
+    coupon_response = result["data"]["coupon"]
 
     aggregate_failures do
-      expect(coupon_response['id']).to eq(coupon.id)
-      expect(coupon_response['customerCount']).to eq(1)
-      expect(coupon_response['appliedCouponsCount']).to eq(1)
+      expect(coupon_response["id"]).to eq(coupon.id)
+      expect(coupon_response["customersCount"]).to eq(1)
+      expect(coupon_response["description"]).to eq(coupon.description)
+      expect(coupon_response["appliedCouponsCount"]).to eq(1)
     end
   end
 
-  context 'without current organization' do
-    it 'returns an error' do
-      result = execute_graphql(
-        current_user: membership.user,
-        query:,
-        variables: { couponId: coupon.id },
-      )
-
-      expect_graphql_error(result:, message: 'Missing organization id')
-    end
-  end
-
-  context 'when plan is not found' do
-    it 'returns an error' do
+  context "when plan is not found" do
+    it "returns an error" do
       result = execute_graphql(
         current_user: membership.user,
         current_organization: organization,
+        permissions: required_permission,
         query:,
-        variables: { couponId: 'foo' },
+        variables: {couponId: "foo"}
       )
 
-      expect_graphql_error(result:, message: 'Resource not found')
+      expect_graphql_error(result:, message: "Resource not found")
     end
   end
 end

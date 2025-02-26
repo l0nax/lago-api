@@ -2,49 +2,53 @@
 
 module CreditNotes
   class CreateFromTermination < BaseService
-    def initialize(subscription:, reason: 'order_change')
+    def initialize(subscription:, reason: "order_change", upgrade: false)
       @subscription = subscription
       @reason = reason
+      @upgrade = upgrade
 
       super
     end
 
     def call
-      return result if (last_subscription_fee&.amount_cents || 0).zero?
+      return result if (last_subscription_fee&.amount_cents || 0).zero? || last_subscription_fee.invoice.voided?
 
       amount = compute_amount
       return result unless amount.positive?
+
+      # NOTE: In some cases, if the fee was already prorated (in case of multiple upgrade) the amount
+      #       could be greater than the last subscription fee amount.
+      #       In that case, we have to use the last subscription fee amount
+      amount = last_subscription_fee.amount_cents if amount > last_subscription_fee.amount_cents
 
       # NOTE: if credit notes were already issued on the fee,
       #       we have to deduct them from the prorated amount
       amount -= last_subscription_fee.credit_note_items.sum(:amount_cents)
       return result unless amount.positive?
 
-      vat_amount = (amount * last_subscription_fee.vat_rate).fdiv(100)
-
       CreditNotes::CreateService.new(
         invoice: last_subscription_fee.invoice,
-        credit_amount_cents: (amount + vat_amount).round,
+        credit_amount_cents: creditable_amount_cents(amount),
         refund_amount_cents: 0,
         items: [
           {
             fee_id: last_subscription_fee.id,
-            amount_cents: amount,
-          },
+            amount_cents: amount.truncate(CreditNote::DB_PRECISION_SCALE)
+          }
         ],
         reason: reason.to_sym,
-        automatic: true,
+        automatic: true
       ).call
     end
 
     private
 
-    attr_accessor :subscription, :reason
+    attr_accessor :subscription, :reason, :upgrade
 
     delegate :plan, :terminated_at, :customer, to: :subscription
 
     def last_subscription_fee
-      @last_subscription_fee ||= subscription.fees.order(created_at: :desc).first
+      @last_subscription_fee ||= subscription.fees.subscription.order(created_at: :desc).first
     end
 
     def compute_amount
@@ -54,8 +58,12 @@ module CreditNotes
     def date_service
       @date_service ||= Subscriptions::DatesService.new_instance(
         subscription,
-        terminated_at,
+        terminated_at
       )
+    end
+
+    def plan_amount_cents
+      last_subscription_fee&.amount_details&.[]("plan_amount_cents") || plan.amount_cents
     end
 
     def to_date
@@ -63,7 +71,7 @@ module CreditNotes
     end
 
     def day_price
-      date_service.single_day_price
+      date_service.single_day_price(plan_amount_cents:)
     end
 
     def terminated_at_in_timezone
@@ -72,16 +80,37 @@ module CreditNotes
 
     def remaining_duration
       billed_from = terminated_at_in_timezone.end_of_day.utc.to_date
+      billed_from -= 1.day if upgrade
 
       if plan.has_trial? && subscription.trial_end_date >= billed_from
         billed_from = if subscription.trial_end_date > to_date
           to_date
         else
-          subscription.trial_end_date
+          subscription.trial_end_date - 1.day
         end
       end
 
-      (to_date - billed_from).to_i
+      duration = (to_date - billed_from).to_i
+
+      duration.negative? ? 0 : duration
+    end
+
+    def creditable_amount_cents(item_amount)
+      taxes_result = CreditNotes::ApplyTaxesService.call(
+        invoice: last_subscription_fee.invoice,
+        items: [
+          CreditNoteItem.new(
+            fee_id: last_subscription_fee.id,
+            precise_amount_cents: item_amount.truncate(CreditNote::DB_PRECISION_SCALE)
+          )
+        ]
+      )
+
+      (
+        item_amount.truncate(CreditNote::DB_PRECISION_SCALE) -
+        taxes_result.coupons_adjustment_amount_cents +
+        taxes_result.taxes_amount_cents
+      ).round
     end
   end
 end

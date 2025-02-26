@@ -1,17 +1,25 @@
 # frozen_string_literal: true
 
-require 'rails_helper'
+require "rails_helper"
 
 RSpec.describe Fees::ChargeService do
   subject(:charge_subscription_service) do
-    described_class.new(invoice: invoice, charge: charge, subscription: subscription, boundaries: boundaries)
+    described_class.new(invoice:, charge:, subscription:, boundaries:, context:, apply_taxes:)
   end
+
+  around { |test| lago_premium!(&test) }
+
+  let(:customer) { create(:customer) }
+  let(:organization) { customer.organization }
+  let(:context) { :finalize }
+  let(:apply_taxes) { false }
 
   let(:subscription) do
     create(
       :subscription,
       status: :active,
-      started_at: DateTime.parse('2022-03-15'),
+      started_at: Time.zone.parse("2022-03-15"),
+      customer:
     )
   end
 
@@ -21,63 +29,295 @@ RSpec.describe Fees::ChargeService do
       to_datetime: subscription.started_at.end_of_month.end_of_day,
       charges_from_datetime: subscription.started_at.beginning_of_day,
       charges_to_datetime: subscription.started_at.end_of_month.end_of_day,
+      timestamp: subscription.started_at.end_of_month.end_of_day + 1.second,
+      charges_duration: (
+        subscription.started_at.end_of_month.end_of_day - subscription.started_at.beginning_of_month
+      ).fdiv(1.day).ceil
     }
   end
 
   let(:invoice) do
-    create(:invoice)
+    create(:invoice, customer:, organization:)
   end
 
-  let(:billable_metric) { create(:billable_metric, aggregation_type: 'count_agg') }
+  let(:billable_metric) { create(:billable_metric, organization:, aggregation_type: "count_agg") }
   let(:charge) do
     create(
       :standard_charge,
       plan: subscription.plan,
-      billable_metric: billable_metric,
+      billable_metric:,
       properties: {
-        amount: '20',
-        amount_currency: 'EUR',
-      },
+        amount: "20"
+      }
     )
   end
 
-  describe '.create' do
-    context 'without group properties' do
-      it 'creates a fee' do
-        result = charge_subscription_service.create
+  describe ".call" do
+    context "without filters" do
+      it "creates a fee" do
+        result = charge_subscription_service.call
         expect(result).to be_success
-        created_fee = result.fees.first
+        expect(result.fees.count).to be_zero
+      end
 
-        aggregate_failures do
-          expect(created_fee.id).not_to be_nil
-          expect(created_fee.invoice_id).to eq(invoice.id)
-          expect(created_fee.charge_id).to eq(charge.id)
-          expect(created_fee.amount_cents).to eq(0)
-          expect(created_fee.amount_currency).to eq('EUR')
-          expect(created_fee.vat_amount_cents).to eq(0)
-          expect(created_fee.vat_rate).to eq(20.0)
-          expect(created_fee.units).to eq(0)
-          expect(created_fee.events_count).to eq(0)
+      context "with an event" do
+        let(:event) do
+          create(
+            :event,
+            organization: subscription.organization,
+            subscription:,
+            code: billable_metric.code,
+            timestamp: boundaries[:charges_to_datetime] - 2.days
+          )
+        end
+
+        before { event }
+
+        it "creates a fee" do
+          result = charge_subscription_service.call
+          expect(result).to be_success
+          expect(result.fees.first).to have_attributes(
+            id: String,
+            invoice_id: invoice.id,
+            charge_id: charge.id,
+            amount_cents: 2000,
+            precise_amount_cents: 2000.0,
+            taxes_precise_amount_cents: 0.0,
+            amount_currency: "EUR",
+            units: 1,
+            unit_amount_cents: 2000,
+            precise_unit_amount: 20,
+            events_count: 1,
+            payment_status: "pending"
+          )
+        end
+
+        it "persists fee" do
+          expect { charge_subscription_service.call }.to change(Fee, :count)
+        end
+
+        context "with preview context" do
+          let(:context) { :invoice_preview }
+
+          it "does not persist fee" do
+            expect { charge_subscription_service.call }.not_to change(Fee, :count)
+          end
         end
       end
 
-      context 'with graduated charge model' do
+      context "with grouped standard charge" do
+        let(:charge) do
+          create(
+            :standard_charge,
+            plan: subscription.plan,
+            billable_metric:,
+            properties: {
+              amount: "20",
+              grouped_by: ["cloud"]
+            }
+          )
+        end
+
+        let(:billable_metric) do
+          create(:billable_metric, organization:, aggregation_type: "sum_agg", field_name: "value")
+        end
+
+        context "without events" do
+          it "does not create a fee" do
+            result = charge_subscription_service.call
+            expect(result).to be_success
+            expect(result.fees.count).to eq(0)
+          end
+
+          context "when organization as zero_amount_fees premium integration" do
+            before do
+              organization.update!(premium_integrations: ["zero_amount_fees"])
+            end
+
+            it "creates a fee" do
+              result = charge_subscription_service.call
+              expect(result).to be_success
+              expect(result.fees.count).to eq(1)
+            end
+          end
+        end
+
+        context "with events" do
+          before do
+            create(
+              :event,
+              organization: subscription.organization,
+              subscription:,
+              code: charge.billable_metric.code,
+              timestamp: Time.zone.parse("2022-03-16"),
+              properties: {cloud: "aws", value: 10}
+            )
+
+            create(
+              :event,
+              organization: subscription.organization,
+              subscription:,
+              code: charge.billable_metric.code,
+              timestamp: Time.zone.parse("2022-03-16"),
+              properties: {cloud: "aws", value: 5}
+            )
+
+            create(
+              :event,
+              organization: subscription.organization,
+              subscription:,
+              code: charge.billable_metric.code,
+              timestamp: Time.zone.parse("2022-03-16"),
+              properties: {cloud: "gcp", value: 10}
+            )
+          end
+
+          it "creates a fee for each group" do
+            result = charge_subscription_service.call
+            expect(result).to be_success
+            expect(result.fees.count).to eq(2)
+
+            fee1 = result.fees.find { |f| f.grouped_by["cloud"] == "aws" }
+            expect(fee1).to have_attributes(
+              id: String,
+              invoice_id: invoice.id,
+              charge_id: charge.id,
+              amount_cents: 30_000,
+              precise_amount_cents: 30_000.0,
+              taxes_precise_amount_cents: 0.0,
+              amount_currency: "EUR",
+              units: 15,
+              unit_amount_cents: 2000,
+              precise_unit_amount: 20,
+              grouped_by: {"cloud" => "aws"}
+            )
+
+            fee2 = result.fees.find { |f| f.grouped_by["cloud"] == "gcp" }
+            expect(fee2).to have_attributes(
+              id: String,
+              invoice_id: invoice.id,
+              charge_id: charge.id,
+              amount_cents: 20_000,
+              precise_amount_cents: 20_000.0,
+              taxes_precise_amount_cents: 0.0,
+              amount_currency: "EUR",
+              units: 10,
+              unit_amount_cents: 2000,
+              precise_unit_amount: 20,
+              grouped_by: {"cloud" => "gcp"}
+            )
+          end
+
+          context "with adjusted fee" do
+            let(:adjusted_fee) do
+              create(
+                :adjusted_fee,
+                invoice:,
+                subscription:,
+                charge:,
+                properties:,
+                fee_type: :charge,
+                adjusted_units: true,
+                adjusted_amount: false,
+                units: 3,
+                grouped_by: {"cloud" => "aws"}
+              )
+            end
+
+            let(:properties) do
+              {
+                charges_from_datetime: boundaries[:charges_from_datetime],
+                charges_to_datetime: boundaries[:charges_to_datetime]
+              }
+            end
+
+            before do
+              adjusted_fee
+              invoice.draft!
+            end
+
+            it "creates a fee for each group" do
+              result = charge_subscription_service.call
+              expect(result).to be_success
+              expect(result.fees.count).to eq(2)
+
+              fee1 = result.fees.find { |f| f.grouped_by["cloud"] == "aws" }
+              expect(fee1).to have_attributes(
+                id: String,
+                invoice_id: invoice.id,
+                charge_id: charge.id,
+                amount_cents: 6_000,
+                precise_amount_cents: 6_000.0,
+                taxes_precise_amount_cents: 0.0,
+                amount_currency: "EUR",
+                units: 3,
+                unit_amount_cents: 2000,
+                precise_unit_amount: 20,
+                grouped_by: {"cloud" => "aws"}
+              )
+
+              fee2 = result.fees.find { |f| f.grouped_by["cloud"] == "gcp" }
+              expect(fee2).to have_attributes(
+                id: String,
+                invoice_id: invoice.id,
+                charge_id: charge.id,
+                amount_cents: 20_000,
+                precise_amount_cents: 20_000.0,
+                taxes_precise_amount_cents: 0.0,
+                amount_currency: "EUR",
+                units: 10,
+                unit_amount_cents: 2000,
+                precise_unit_amount: 20,
+                grouped_by: {"cloud" => "gcp"}
+              )
+            end
+          end
+
+          context "with recurring weighted sum aggregation" do
+            let(:billable_metric) { create(:weighted_sum_billable_metric, :recurring, organization:) }
+
+            it "creates a fee and a cached aggregation per group" do
+              result = charge_subscription_service.call
+              expect(result).to be_success
+
+              expect(result.fees.count).to eq(2)
+              expect(result.cached_aggregations.count).to eq(2)
+            end
+          end
+
+          context "with custom aggregation" do
+            let(:billable_metric) do
+              create(:custom_aggregation_billable_metric, organization:)
+
+              it "creates a fee and a cached aggregation" do
+                result = charge_subscription_service.call
+                expect(result).to be_success
+
+                expect(result.fees.count).to eq(2)
+                expect(result.cached_aggregation.count).to eq(2)
+              end
+            end
+          end
+        end
+      end
+
+      context "with graduated charge model" do
         let(:charge) do
           create(
             :graduated_charge,
             plan: subscription.plan,
-            charge_model: 'graduated',
-            billable_metric: billable_metric,
+            charge_model: "graduated",
+            billable_metric:,
             properties: {
               graduated_ranges: [
                 {
                   from_value: 0,
                   to_value: nil,
-                  per_unit_amount: '0.01',
-                  flat_amount: '0.01',
-                },
-              ],
-            },
+                  per_unit_amount: "0.01",
+                  flat_amount: "0.01"
+                }
+              ]
+            }
           )
         end
 
@@ -86,47 +326,42 @@ RSpec.describe Fees::ChargeService do
             :event,
             4,
             organization: subscription.organization,
-            customer: subscription.customer,
-            subscription: subscription,
+            subscription:,
             code: charge.billable_metric.code,
-            timestamp: DateTime.parse('2022-03-16'),
+            timestamp: Time.zone.parse("2022-03-16")
           )
         end
 
-        it 'creates a fee' do
-          result = charge_subscription_service.create
+        it "creates a fee" do
+          result = charge_subscription_service.call
           expect(result).to be_success
-          created_fee = result.fees.first
-
-          aggregate_failures do
-            expect(created_fee.id).not_to be_nil
-            expect(created_fee.invoice_id).to eq(invoice.id)
-            expect(created_fee.charge_id).to eq(charge.id)
-            expect(created_fee.amount_cents).to eq(5)
-            expect(created_fee.amount_currency).to eq('EUR')
-            expect(created_fee.vat_amount_cents).to eq(1)
-            expect(created_fee.vat_rate).to eq(20.0)
-            expect(created_fee.units.to_s).to eq('4.0')
-          end
-        end
-      end
-
-      context 'when fee already exists on the period' do
-        before do
-          create(
-            :fee,
-            charge: charge,
-            subscription: subscription,
-            invoice: invoice,
+          expect(result.fees.first).to have_attributes(
+            id: String,
+            invoice_id: invoice.id,
+            charge_id: charge.id,
+            amount_cents: 5,
+            precise_amount_cents: 5.0,
+            taxes_precise_amount_cents: 0.0,
+            amount_currency: "EUR",
+            units: 4.0,
+            unit_amount_cents: 1,
+            precise_unit_amount: 0.0125,
+            events_count: 4
           )
         end
+      end
 
-        it 'does not create a new fee' do
-          expect { charge_subscription_service.create }.not_to change(Fee, :count)
+      context "when fee already exists on the period" do
+        before do
+          create(:fee, charge:, subscription:, invoice:)
+        end
+
+        it "does not create a new fee" do
+          expect { charge_subscription_service.call }.not_to change(Fee, :count)
         end
       end
 
-      context 'when billing an new upgraded subscription' do
+      context "when billing an new upgraded subscription" do
         let(:previous_plan) { create(:plan, amount_cents: subscription.plan.amount_cents - 20) }
         let(:previous_subscription) do
           create(:subscription, plan: previous_plan, status: :terminated)
@@ -136,608 +371,1189 @@ RSpec.describe Fees::ChargeService do
           create(
             :event,
             organization: invoice.organization,
-            customer: subscription.customer,
-            subscription: subscription,
+            subscription:,
             code: billable_metric.code,
-            timestamp: Time.zone.parse('10 Apr 2022 00:01:00'),
+            timestamp: Time.zone.parse("10 Apr 2022 00:01:00")
           )
         end
 
         let(:boundaries) do
           {
-            from_datetime: Time.zone.parse('15 Apr 2022 00:01:00'),
-            to_datetime: Time.zone.parse('30 Apr 2022 00:01:00'),
+            from_datetime: Time.zone.parse("15 Apr 2022 00:01:00"),
+            to_datetime: Time.zone.parse("30 Apr 2022 00:01:00"),
             charges_from_datetime: subscription.started_at,
-            charges_to_datetime: Time.zone.parse('30 Apr 2022 00:01:00'),
+            charges_to_datetime: Time.zone.parse("30 Apr 2022 00:01:00"),
+            charges_duration: 30,
+            timestamp: Time.zone.parse("2022-05-01T00:01:00")
           }
         end
 
         before do
-          subscription.update!(previous_subscription: previous_subscription)
+          subscription.update!(previous_subscription:)
           event
         end
 
-        it 'creates a new fee for the complete period' do
-          result = charge_subscription_service.create
+        it "creates a new fee for the complete period" do
+          result = charge_subscription_service.call
           expect(result).to be_success
-          created_fee = result.fees.first
+          expect(result.fees.first).to have_attributes(
+            id: String,
+            invoice_id: invoice.id,
+            charge_id: charge.id,
+            amount_cents: 2000,
+            precise_amount_cents: 2_000.0,
+            taxes_precise_amount_cents: 0.0,
+            amount_currency: "EUR",
+            units: 1
+          )
+        end
+      end
 
-          aggregate_failures do
-            expect(created_fee.id).not_to be_nil
-            expect(created_fee.invoice_id).to eq(invoice.id)
-            expect(created_fee.charge_id).to eq(charge.id)
-            expect(created_fee.amount_cents).to eq(2000)
-            expect(created_fee.amount_currency).to eq('EUR')
-            expect(created_fee.vat_amount_cents).to eq(400)
-            expect(created_fee.vat_rate).to eq(20.0)
-            expect(created_fee.units).to eq(1)
+      context "with all types of aggregation" do
+        let(:event) do
+          create(
+            :event,
+            code: billable_metric.code,
+            organization: organization,
+            external_subscription_id: subscription.external_id,
+            timestamp: boundaries[:charges_to_datetime] - 2.days,
+            properties: {"foo_bar" => 1}
+          )
+        end
+
+        BillableMetric::AGGREGATION_TYPES.keys.each do |aggregation_type|
+          before do
+            billable_metric.update!(
+              aggregation_type:,
+              field_name: event.properties.keys.first,
+              weighted_interval: "seconds",
+              custom_aggregator: "def aggregate(event, agg, aggregation_properties); { total_units: 1, amount: 1 }; end"
+            )
+          end
+
+          it "creates fees" do
+            result = charge_subscription_service.call
+            expect(result).to be_success
+            expect(result.fees.first).to have_attributes(
+              id: String,
+              invoice_id: invoice.id,
+              charge_id: charge.id,
+              amount_cents: 2000,
+              precise_amount_cents: 2000.0,
+              taxes_precise_amount_cents: 0.0,
+              amount_currency: "EUR",
+              units: 1,
+              unit_amount_cents: 2000,
+              precise_unit_amount: 20
+            )
           end
         end
       end
 
-      context 'with all types of aggregation' do
-        BillableMetric::AGGREGATION_TYPES.each do |aggregation_type|
-          before do
-            billable_metric.update!(
-              aggregation_type: aggregation_type,
-              field_name: 'foo_bar',
+      context "when there is adjusted fee" do
+        let(:adjusted_fee) do
+          create(
+            :adjusted_fee,
+            invoice:,
+            subscription:,
+            charge:,
+            properties:,
+            fee_type: :charge,
+            adjusted_units: true,
+            adjusted_amount: false,
+            units: 3
+          )
+        end
+        let(:properties) do
+          {
+            charges_from_datetime: boundaries[:charges_from_datetime],
+            charges_to_datetime: boundaries[:charges_to_datetime]
+          }
+        end
+
+        before do
+          adjusted_fee
+          invoice.draft!
+        end
+
+        context "with adjusted units" do
+          it "creates a fee" do
+            result = charge_subscription_service.call
+
+            expect(result).to be_success
+            expect(result.fees.first).to have_attributes(
+              id: String,
+              invoice_id: invoice.id,
+              charge_id: charge.id,
+              amount_cents: 6_000,
+              precise_amount_cents: 6_000.0,
+              taxes_precise_amount_cents: 0.0,
+              amount_currency: "EUR",
+              units: 3,
+              unit_amount_cents: 2_000,
+              precise_unit_amount: 20,
+              events_count: 0,
+              payment_status: "pending"
             )
           end
 
-          it 'creates fees' do
-            result = charge_subscription_service.create
+          context "when there is true-up fee" do
+            before { charge.update!(min_amount_cents: 20_000) }
+
+            it "creates two fees" do
+              result = charge_subscription_service.call
+
+              aggregate_failures do
+                expect(result).to be_success
+                expect(result.fees.count).to eq(2)
+                expect(result.fees.pluck(:amount_cents)).to contain_exactly(6_000, 4_967)
+                expect(result.fees.pluck(:precise_amount_cents)).to contain_exactly(6_000.0, 4_967.74193548387)
+                expect(result.fees.pluck(:taxes_precise_amount_cents)).to contain_exactly(0.0, 0.0)
+                expect(result.fees.pluck(:unit_amount_cents)).to contain_exactly(2_000, 4_967)
+                expect(result.fees.pluck(:precise_unit_amount)).to contain_exactly(20, 49.67)
+              end
+            end
+          end
+
+          context "with standard charge, all types of aggregation and presence of filters" do
+            let(:region) do
+              create(:billable_metric_filter, billable_metric:, key: "region", values: %w[europe usa])
+            end
+
+            let(:country) do
+              create(:billable_metric_filter, billable_metric:, key: "country", values: %w[france])
+            end
+
+            let(:europe_filter) { create(:charge_filter, charge:, properties: {amount: "20"}) }
+            let(:europe_filter_value) do
+              create(
+                :charge_filter_value,
+                charge_filter: europe_filter,
+                billable_metric_filter: region,
+                values: ["europe"]
+              )
+            end
+
+            let(:usa_filter) { create(:charge_filter, charge:, properties: {amount: "50"}) }
+            let(:usa_filter_value) do
+              create(:charge_filter_value, charge_filter: usa_filter, billable_metric_filter: region, values: ["usa"])
+            end
+
+            let(:france_filter) { create(:charge_filter, charge:, properties: {amount: "10.12345"}) }
+            let(:france_filter_value) do
+              create(
+                :charge_filter_value,
+                charge_filter: france_filter,
+                billable_metric_filter: country,
+                values: ["france"]
+              )
+            end
+
+            let(:charge) do
+              create(
+                :standard_charge,
+                plan: subscription.plan,
+                billable_metric:,
+                properties: {amount: "10.12345"}
+              )
+            end
+
+            let(:adjusted_fee) do
+              create(
+                :adjusted_fee,
+                invoice:,
+                subscription:,
+                charge:,
+                charge_filter: usa_filter,
+                properties:,
+                fee_type: :charge,
+                adjusted_units: true,
+                adjusted_amount: false,
+                units: 3
+              )
+            end
+
+            before do
+              europe_filter_value
+              usa_filter_value
+              france_filter_value
+
+              create(
+                :event,
+                organization: subscription.organization,
+                subscription:,
+                code: charge.billable_metric.code,
+                timestamp: Time.zone.parse("2022-03-16"),
+                properties: {region: "usa", foo_bar: 12}
+              )
+              create(
+                :event,
+                organization: subscription.organization,
+                subscription:,
+                code: charge.billable_metric.code,
+                timestamp: Time.zone.parse("2022-03-16"),
+                properties: {region: "europe", foo_bar: 10}
+              )
+              create(
+                :event,
+                organization: subscription.organization,
+                subscription:,
+                code: charge.billable_metric.code,
+                timestamp: Time.zone.parse("2022-03-16"),
+                properties: {region: "europe", foo_bar: 5}
+              )
+              create(
+                :event,
+                organization: subscription.organization,
+                subscription:,
+                code: charge.billable_metric.code,
+                timestamp: Time.zone.parse("2022-03-16"),
+                properties: {country: "france", foo_bar: 5}
+              )
+            end
+
+            it "creates expected fees for sum_agg aggregation type" do
+              billable_metric.update!(aggregation_type: :sum_agg, field_name: "foo_bar")
+              result = charge_subscription_service.call
+              expect(result).to be_success
+              created_fees = result.fees
+
+              aggregate_failures do
+                expect(created_fees.count).to eq(3)
+                expect(created_fees).to all(
+                  have_attributes(
+                    invoice_id: invoice.id,
+                    charge_id: charge.id,
+                    amount_currency: "EUR"
+                  )
+                )
+
+                europe_fee = created_fees.find { |f| f.charge_filter == europe_filter }
+                expect(europe_fee).to have_attributes(
+                  charge_filter: europe_filter,
+                  amount_cents: 30_000,
+                  precise_amount_cents: 30_000.0,
+                  taxes_precise_amount_cents: 0.0,
+                  units: 15,
+                  unit_amount_cents: 2000,
+                  precise_unit_amount: 20
+                )
+
+                usa_fee = created_fees.find { |f| f.charge_filter == usa_filter }
+                expect(usa_fee).to have_attributes(
+                  charge_filter: usa_filter,
+                  amount_cents: 15_000,
+                  precise_amount_cents: 15_000.0,
+                  taxes_precise_amount_cents: 0.0,
+                  units: 3,
+                  unit_amount_cents: 5000,
+                  precise_unit_amount: 50
+                )
+
+                france_fee = created_fees.find { |f| f.charge_filter == france_filter }
+                expect(france_fee).to have_attributes(
+                  charge_filter: france_filter,
+                  amount_cents: 5062,
+                  precise_amount_cents: 5061.725,
+                  taxes_precise_amount_cents: 0.0,
+                  units: 5,
+                  unit_amount_cents: 1012,
+                  precise_unit_amount: 10.12345
+                )
+              end
+            end
+          end
+        end
+
+        context "with adjusted amount" do
+          let(:adjusted_fee) do
+            create(
+              :adjusted_fee,
+              invoice:,
+              subscription:,
+              charge:,
+              properties:,
+              fee_type: :charge,
+              adjusted_units: false,
+              adjusted_amount: true,
+              units: 1000,
+              unit_amount_cents: 0,
+              unit_precise_amount_cents: 0.1
+            )
+          end
+
+          it "creates a fee" do
+            result = charge_subscription_service.call
+
             expect(result).to be_success
-            created_fee = result.fees.first
+            expect(result.fees.first).to have_attributes(
+              id: String,
+              invoice_id: invoice.id,
+              charge_id: charge.id,
+              amount_cents: 100,
+              precise_amount_cents: 100.0,
+              taxes_precise_amount_cents: 0.0,
+              amount_currency: "EUR",
+              units: 1000,
+              unit_amount_cents: 0,
+              precise_unit_amount: 0.001,
+              events_count: 0,
+              payment_status: "pending"
+            )
+          end
+        end
+
+        context "with adjusted display name" do
+          let(:adjusted_fee) do
+            create(
+              :adjusted_fee,
+              invoice:,
+              subscription:,
+              charge:,
+              properties:,
+              fee_type: :charge,
+              adjusted_units: false,
+              adjusted_amount: false,
+              invoice_display_name: "test123",
+              units: 3
+            )
+          end
+
+          it "creates a fee" do
+            result = charge_subscription_service.call
+
+            expect(result).to be_success
+            expect(result.fees.first).to have_attributes(
+              id: String,
+              invoice_id: invoice.id,
+              charge_id: charge.id,
+              amount_cents: 0,
+              precise_amount_cents: 0.0,
+              taxes_precise_amount_cents: 0.0,
+              amount_currency: "EUR",
+              units: 0,
+              unit_amount_cents: 0,
+              precise_unit_amount: 0,
+              events_count: 0,
+              payment_status: "pending",
+              invoice_display_name: "test123"
+            )
+          end
+        end
+
+        context "with invoice NOT in draft status" do
+          before { invoice.finalized! }
+
+          it "creates a fee without using adjusted fee attributes" do
+            result = charge_subscription_service.call
+
+            expect(result).to be_success
+            expect(result.fees.first).to have_attributes(
+              id: String,
+              invoice_id: invoice.id,
+              charge_id: charge.id,
+              amount_cents: 0,
+              amount_currency: "EUR",
+              units: 0,
+              unit_amount_cents: 0,
+              precise_unit_amount: 0,
+              events_count: 0,
+              payment_status: "pending"
+            )
+          end
+        end
+      end
+
+      context "with true-up fee" do
+        it "creates two fees" do
+          travel_to(Time.zone.parse("2023-04-01")) do
+            charge.update!(min_amount_cents: 1000)
+            result = charge_subscription_service.call
 
             aggregate_failures do
-              expect(created_fee.id).not_to be_nil
-              expect(created_fee.invoice_id).to eq(invoice.id)
-              expect(created_fee.charge_id).to eq(charge.id)
-              expect(created_fee.amount_cents).to eq(0)
-              expect(created_fee.amount_currency).to eq('EUR')
-              expect(created_fee.vat_amount_cents).to eq(0)
-              expect(created_fee.vat_rate).to eq(20.0)
-              expect(created_fee.units).to eq(0)
+              expect(result).to be_success
+              expect(result.fees.count).to eq(2)
+              expect(result.fees.pluck(:amount_cents)).to contain_exactly(0, 548) # 548 is 1000 prorated for 17 days.
+              expect(result.fees.pluck(:precise_amount_cents)).to contain_exactly(0.0, 548.3870967741935) # 548 is 1000 prorated for 17 days.
+              expect(result.fees.pluck(:taxes_precise_amount_cents)).to contain_exactly(0.0, 0.0) # 548 is 1000 prorated for 17 days.
+              expect(result.fees.pluck(:unit_amount_cents)).to contain_exactly(0, 548)
+              expect(result.fees.pluck(:precise_unit_amount)).to contain_exactly(0, 5.48)
             end
           end
         end
       end
+
+      context "with negative units" do
+        let(:charge) do
+          create(
+            :graduated_charge,
+            plan: subscription.plan,
+            charge_model: "graduated",
+            billable_metric:,
+            properties: {
+              graduated_ranges: [
+                {
+                  from_value: 0,
+                  to_value: nil,
+                  per_unit_amount: "0.01",
+                  flat_amount: "0.01"
+                }
+              ]
+            }
+          )
+        end
+
+        let(:billable_metric) { create(:sum_billable_metric, organization:) }
+
+        before do
+          create(
+            :event,
+            organization: subscription.organization,
+            subscription:,
+            code: billable_metric.code,
+            timestamp: Time.zone.parse("2022-03-16"),
+            properties: {item_id: -10}
+          )
+        end
+
+        it "creates a fee with 0 units but expected amount details" do
+          result = charge_subscription_service.call
+          expect(result).to be_success
+          expect(result.fees.first).to have_attributes(
+            id: String,
+            invoice_id: invoice.id,
+            charge_id: charge.id,
+            amount_cents: 0,
+            precise_amount_cents: 0.0,
+            taxes_precise_amount_cents: 0.0,
+            amount_currency: "EUR",
+            units: 0,
+            unit_amount_cents: 0,
+            precise_unit_amount: 0,
+            events_count: 1,
+            payment_status: "pending",
+            amount_details: {
+              "graduated_ranges" => [
+                {
+                  "flat_unit_amount" => "0.01",
+                  "from_value" => 0,
+                  "per_unit_amount" => "0.01",
+                  "per_unit_total_amount" => "-0.1",
+                  "to_value" => nil,
+                  "total_with_flat_amount" => "-0.09",
+                  "units" => "-10.0"
+                }
+              ]
+            }
+          )
+        end
+      end
     end
 
-    context 'with standard charge, all types of aggregation and presence of groups' do
-      let(:europe) do
-        create(:group, billable_metric_id: billable_metric.id, key: 'region', value: 'europe')
+    context "with standard charge, all types of aggregation and presence of filter" do
+      let(:region) do
+        create(:billable_metric_filter, billable_metric:, key: "region", values: %w[europe usa])
       end
 
-      let(:usa) do
-        create(:group, billable_metric_id: billable_metric.id, key: 'region', value: 'usa')
+      let(:country) do
+        create(:billable_metric_filter, billable_metric:, key: "country", values: %w[france])
       end
 
-      let(:france) do
-        create(:group, billable_metric_id: billable_metric.id, key: 'country', value: 'france')
+      let(:europe_filter) { create(:charge_filter, charge:, properties: {amount: "20"}) }
+      let(:europe_filter_value) do
+        create(:charge_filter_value, charge_filter: europe_filter, billable_metric_filter: region, values: ["europe"])
+      end
+
+      let(:usa_filter) { create(:charge_filter, charge:, properties: {amount: "50"}) }
+      let(:usa_filter_value) do
+        create(:charge_filter_value, charge_filter: usa_filter, billable_metric_filter: region, values: ["usa"])
+      end
+
+      let(:france_filter) { create(:charge_filter, charge:, properties: {amount: "10.12345"}) }
+      let(:france_filter_value) do
+        create(:charge_filter_value, charge_filter: france_filter, billable_metric_filter: country, values: ["france"])
       end
 
       let(:charge) do
         create(
           :standard_charge,
           plan: subscription.plan,
-          billable_metric: billable_metric,
-          group_properties: [
-            build(
-              :group_property,
-              group: europe,
-              values: {
-                amount: '20',
-                amount_currency: 'EUR',
-              },
-            ),
-            build(
-              :group_property,
-              group: usa,
-              values: {
-                amount: '50',
-                amount_currency: 'EUR',
-              },
-            ),
-            build(
-              :group_property,
-              group: france,
-              values: {
-                amount: '40',
-                amount_currency: 'EUR',
-              },
-            ),
-          ],
+          billable_metric:,
+          properties: {amount: "10.12345"}
         )
       end
 
       before do
+        europe_filter_value
+        usa_filter_value
+        france_filter_value
+
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'usa', foo_bar: 12 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {foo_bar: 12}
         )
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'europe', foo_bar: 10 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "usa", foo_bar: 12}
         )
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'europe', foo_bar: 5 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "europe", foo_bar: 10}
         )
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { country: 'france', foo_bar: 5 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "europe", foo_bar: 5}
+        )
+        create(
+          :event,
+          organization: subscription.organization,
+          subscription:,
+          code: charge.billable_metric.code,
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {country: "france", foo_bar: 5}
         )
       end
 
-      it 'creates expected fees for count_agg aggregation type' do
+      it "creates expected fees for count_agg aggregation type" do
         billable_metric.update!(aggregation_type: :count_agg)
-        result = charge_subscription_service.create
+        result = charge_subscription_service.call
         expect(result).to be_success
         created_fees = result.fees
 
         aggregate_failures do
-          expect(created_fees.count).to eq(3)
+          expect(created_fees.count).to eq(4)
           expect(created_fees).to all(
             have_attributes(
               invoice_id: invoice.id,
               charge_id: charge.id,
-              amount_currency: 'EUR',
-              vat_rate: 20.0,
-            ),
+              amount_currency: "EUR"
+            )
           )
           expect(created_fees.first).to have_attributes(
-            group: europe,
+            charge_filter: europe_filter,
             amount_cents: 4000,
-            vat_amount_cents: 800,
+            precise_amount_cents: 4000.0,
+            taxes_precise_amount_cents: 0.0,
             units: 2,
+            unit_amount_cents: 2000,
+            precise_unit_amount: 20
           )
+
           expect(created_fees.second).to have_attributes(
-            group: usa,
+            charge_filter: usa_filter,
             amount_cents: 5000,
-            vat_amount_cents: 1000,
+            precise_amount_cents: 5000.0,
+            taxes_precise_amount_cents: 0.0,
             units: 1,
+            unit_amount_cents: 5000,
+            precise_unit_amount: 50
           )
+
           expect(created_fees.third).to have_attributes(
-            group: france,
-            amount_cents: 4000,
-            vat_amount_cents: 800,
+            charge_filter: france_filter,
+            amount_cents: 1012,
+            precise_amount_cents: 1012.345,
+            taxes_precise_amount_cents: 0.0,
             units: 1,
+            unit_amount_cents: 1012,
+            precise_unit_amount: 10.12345
           )
         end
       end
 
-      it 'creates expected fees for sum_agg aggregation type' do
-        billable_metric.update!(aggregation_type: :sum_agg, field_name: 'foo_bar')
-        result = charge_subscription_service.create
+      it "creates expected fees for sum_agg aggregation type" do
+        billable_metric.update!(aggregation_type: :sum_agg, field_name: "foo_bar")
+        result = charge_subscription_service.call
         expect(result).to be_success
         created_fees = result.fees
 
         aggregate_failures do
-          expect(created_fees.count).to eq(3)
+          expect(created_fees.count).to eq(4)
           expect(created_fees).to all(
             have_attributes(
               invoice_id: invoice.id,
               charge_id: charge.id,
-              amount_currency: 'EUR',
-              vat_rate: 20.0,
-            ),
+              amount_currency: "EUR"
+            )
           )
           expect(created_fees.first).to have_attributes(
-            group: europe,
+            charge_filter: europe_filter,
             amount_cents: 30_000,
-            vat_amount_cents: 6000,
+            precise_amount_cents: 30_000.0,
+            taxes_precise_amount_cents: 0.0,
             units: 15,
+            unit_amount_cents: 2000,
+            precise_unit_amount: 20
           )
+
           expect(created_fees.second).to have_attributes(
-            group: usa,
+            charge_filter: usa_filter,
             amount_cents: 60_000,
-            vat_amount_cents: 12_000,
+            precise_amount_cents: 60_000.0,
+            taxes_precise_amount_cents: 0.0,
             units: 12,
+            unit_amount_cents: 5000,
+            precise_unit_amount: 50
           )
+
           expect(created_fees.third).to have_attributes(
-            group: france,
-            amount_cents: 20_000,
-            vat_amount_cents: 4000,
+            charge_filter: france_filter,
+            amount_cents: 5062,
+            precise_amount_cents: 5061.725,
+            taxes_precise_amount_cents: 0.0,
             units: 5,
+            unit_amount_cents: 1012,
+            precise_unit_amount: 10.12345
           )
         end
       end
 
-      it 'creates expected fees for max_agg aggregation type' do
-        billable_metric.update!(aggregation_type: :max_agg, field_name: 'foo_bar')
-        result = charge_subscription_service.create
+      it "creates expected fees for max_agg aggregation type" do
+        billable_metric.update!(aggregation_type: :max_agg, field_name: "foo_bar")
+        result = charge_subscription_service.call
         expect(result).to be_success
         created_fees = result.fees
 
         aggregate_failures do
-          expect(created_fees.count).to eq(3)
+          expect(created_fees.count).to eq(4)
           expect(created_fees).to all(
             have_attributes(
               invoice_id: invoice.id,
               charge_id: charge.id,
-              amount_currency: 'EUR',
-              vat_rate: 20.0,
-            ),
+              amount_currency: "EUR"
+            )
           )
           expect(created_fees.first).to have_attributes(
-            group: europe,
+            charge_filter: europe_filter,
             amount_cents: 20_000,
-            vat_amount_cents: 4000,
+            precise_amount_cents: 20_000.0,
+            taxes_precise_amount_cents: 0.0,
             units: 10,
+            unit_amount_cents: 2000,
+            precise_unit_amount: 20
           )
+
           expect(created_fees.second).to have_attributes(
-            group: usa,
+            charge_filter: usa_filter,
             amount_cents: 60_000,
-            vat_amount_cents: 12_000,
+            precise_amount_cents: 60_000.0,
+            taxes_precise_amount_cents: 0.0,
             units: 12,
+            unit_amount_cents: 5000,
+            precise_unit_amount: 50
           )
+
           expect(created_fees.third).to have_attributes(
-            group: france,
-            amount_cents: 20_000,
-            vat_amount_cents: 4000,
+            charge_filter: france_filter,
+            amount_cents: 5062,
+            precise_amount_cents: 5061.725,
+            taxes_precise_amount_cents: 0.0,
             units: 5,
+            unit_amount_cents: 1012,
+            precise_unit_amount: 10.12345
           )
         end
       end
 
-      it 'creates expected fees for unique_count_agg aggregation type' do
-        billable_metric.update!(aggregation_type: :unique_count_agg, field_name: 'foo_bar')
-        result = charge_subscription_service.create
-        expect(result).to be_success
-        created_fees = result.fees
+      context "when unique_count_agg" do
+        it "creates expected fees for unique_count_agg aggregation type" do
+          billable_metric.update!(aggregation_type: :unique_count_agg, field_name: "foo_bar")
+          result = charge_subscription_service.call
+          expect(result).to be_success
+          created_fees = result.fees
 
-        aggregate_failures do
-          expect(created_fees.count).to eq(3)
-          expect(created_fees).to all(
-            have_attributes(
-              invoice_id: invoice.id,
-              charge_id: charge.id,
-              amount_currency: 'EUR',
-              vat_rate: 20.0,
-            ),
-          )
-          expect(created_fees.first).to have_attributes(
-            group: europe,
-            amount_cents: 4000,
-            vat_amount_cents: 800,
-            units: 2,
-          )
-          expect(created_fees.second).to have_attributes(
-            group: usa,
-            amount_cents: 5000,
-            vat_amount_cents: 1000,
-            units: 1,
-          )
-          expect(created_fees.third).to have_attributes(
-            group: france,
-            amount_cents: 4000,
-            vat_amount_cents: 800,
-            units: 1,
-          )
-        end
-      end
+          aggregate_failures do
+            expect(created_fees.count).to eq(4)
+            expect(created_fees).to all(
+              have_attributes(
+                invoice_id: invoice.id,
+                charge_id: charge.id,
+                amount_currency: "EUR"
+              )
+            )
+            expect(created_fees.first).to have_attributes(
+              charge_filter: europe_filter,
+              amount_cents: 4000,
+              precise_amount_cents: 4_000.0,
+              taxes_precise_amount_cents: 0.0,
+              units: 2
+            )
 
-      it 'creates expected fees for recurring_count_agg aggregation type' do
-        boundaries = {
-          from_datetime: subscription.started_at.at_beginning_of_month.next_month.beginning_of_day,
-          to_datetime: subscription.started_at.next_month.end_of_month.end_of_day,
-          charges_from_datetime: subscription.started_at.at_beginning_of_month.next_month.beginning_of_day,
-          charges_to_datetime: subscription.started_at.next_month.end_of_month.end_of_day,
-        }
+            expect(created_fees.second).to have_attributes(
+              charge_filter: usa_filter,
+              amount_cents: 5000,
+              precise_amount_cents: 5_000.0,
+              taxes_precise_amount_cents: 0.0,
+              units: 1
+            )
 
-        create(
-          :persisted_event,
-          customer: subscription.customer,
-          billable_metric: billable_metric,
-          external_subscription_id: subscription.external_id,
-          external_id: 'ext_11',
-          added_at: subscription.started_at - 1.day,
-          properties: {
-            'operation_type' => 'add',
-            'unique_id' => 'ext_123',
-            'region' => 'usa',
-            'foo_bar' => 12,
-          },
-        )
-        create(
-          :persisted_event,
-          customer: subscription.customer,
-          billable_metric: billable_metric,
-          external_subscription_id: subscription.external_id,
-          external_id: 'ext_12',
-          added_at: subscription.started_at - 1.day,
-          properties: {
-            'operation_type' => 'add',
-            'unique_id' => 'ext_456',
-            'region' => 'europe',
-            'foo_bar' => 10,
-          },
-        )
-        create(
-          :persisted_event,
-          customer: subscription.customer,
-          billable_metric: billable_metric,
-          external_subscription_id: subscription.external_id,
-          external_id: 'ext_13',
-          added_at: subscription.started_at - 1.day,
-          properties: {
-            'operation_type' => 'add',
-            'unique_id' => 'ext_789',
-            'country' => 'france',
-            'foo_bar' => 5,
-          },
-        )
-
-        billable_metric.update!(aggregation_type: :recurring_count_agg, field_name: 'foo_bar')
-        result = described_class.new(
-          invoice: invoice,
-          charge: charge,
-          subscription: subscription,
-          boundaries: boundaries,
-        ).create
-        expect(result).to be_success
-        created_fees = result.fees
-
-        aggregate_failures do
-          expect(created_fees.count).to eq(3)
-          expect(created_fees).to all(
-            have_attributes(
-              invoice_id: invoice.id,
-              charge_id: charge.id,
-              amount_currency: 'EUR',
-              vat_rate: 20.0,
-            ),
-          )
-          expect(created_fees.first).to have_attributes(
-            group: europe,
-            amount_cents: 2000,
-            vat_amount_cents: 400,
-            units: 1,
-          )
-          expect(created_fees.second).to have_attributes(
-            group: usa,
-            amount_cents: 5000,
-            vat_amount_cents: 1000,
-            units: 1,
-          )
-          expect(created_fees.third).to have_attributes(
-            group: france,
-            amount_cents: 4000,
-            vat_amount_cents: 800,
-            units: 1,
-          )
+            expect(created_fees.third).to have_attributes(
+              charge_filter: france_filter,
+              amount_cents: 1012,
+              precise_amount_cents: 1012.345,
+              taxes_precise_amount_cents: 0.0,
+              units: 1,
+              unit_amount_cents: 1012,
+              precise_unit_amount: 10.12345
+            )
+          end
         end
       end
     end
 
-    context 'with package charge and presence of groups' do
-      let(:europe) do
-        create(:group, billable_metric_id: billable_metric.id, key: 'region', value: 'europe')
+    context "with package charge and presence of filters" do
+      let(:region) do
+        create(:billable_metric_filter, billable_metric:, key: "region", values: %w[europe usa])
       end
 
-      let(:usa) do
-        create(:group, billable_metric_id: billable_metric.id, key: 'region', value: 'usa')
+      let(:country) do
+        create(:billable_metric_filter, billable_metric:, key: "country", values: %w[france])
       end
 
-      let(:france) do
-        create(:group, billable_metric_id: billable_metric.id, key: 'country', value: 'france')
+      let(:europe_filter) do
+        create(
+          :charge_filter,
+          charge:,
+          properties: {
+            amount: "100",
+            free_units: 1,
+            package_size: 8
+          }
+        )
+      end
+      let(:europe_filter_value) do
+        create(
+          :charge_filter_value,
+          charge_filter: europe_filter,
+          billable_metric_filter: region,
+          values: ["europe"]
+        )
+      end
+
+      let(:usa_filter) do
+        create(
+          :charge_filter,
+          charge:,
+          properties: {
+            amount: "50",
+            free_units: 0,
+            package_size: 10
+          }
+        )
+      end
+      let(:usa_filter_value) do
+        create(:charge_filter_value, charge_filter: usa_filter, billable_metric_filter: region, values: ["usa"])
+      end
+
+      let(:france_filter) do
+        create(
+          :charge_filter,
+          charge:,
+          properties: {
+            amount: "40",
+            free_units: 1,
+            package_size: 5
+          }
+        )
+      end
+      let(:france_filter_value) do
+        create(
+          :charge_filter_value,
+          charge_filter: france_filter,
+          billable_metric_filter: country,
+          values: ["france"]
+        )
       end
 
       let(:charge) do
         create(
           :package_charge,
           plan: subscription.plan,
-          billable_metric: billable_metric,
-          group_properties: [
-            build(
-              :group_property,
-              group: europe,
-              values: {
-                amount: '100',
-                free_units: 1,
-                package_size: 8,
-              },
-            ),
-            build(
-              :group_property,
-              group: usa,
-              values: {
-                amount: '50',
-                free_units: 0,
-                package_size: 10,
-              },
-            ),
-            build(
-              :group_property,
-              group: france,
-              values: {
-                amount: '40',
-                free_units: 1,
-                package_size: 5,
-              },
-            ),
-          ],
+          billable_metric:,
+          properties: {
+            amount: "0",
+            free_units: 0,
+            package_size: 1
+          }
         )
       end
 
       before do
+        europe_filter_value
+        usa_filter_value
+        france_filter_value
+
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'usa', foo_bar: 12 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {foo_bar: 12}
         )
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'europe', foo_bar: 10 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "usa", foo_bar: 12}
         )
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'europe', foo_bar: 5 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "europe", foo_bar: 10}
         )
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { country: 'france', foo_bar: 5 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "europe", foo_bar: 5}
+        )
+        create(
+          :event,
+          organization: subscription.organization,
+          subscription:,
+          code: charge.billable_metric.code,
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {country: "france", foo_bar: 5}
         )
       end
 
-      it 'creates expected fees for count_agg aggregation type' do
+      it "creates expected fees for count_agg aggregation type" do
         billable_metric.update!(aggregation_type: :count_agg)
-        result = charge_subscription_service.create
+        result = charge_subscription_service.call
         expect(result).to be_success
         created_fees = result.fees
 
         aggregate_failures do
-          expect(created_fees.count).to eq(3)
+          expect(created_fees.count).to eq(4)
           expect(created_fees).to all(
             have_attributes(
               invoice_id: invoice.id,
               charge_id: charge.id,
-              amount_currency: 'EUR',
-              vat_rate: 20.0,
-            ),
+              amount_currency: "EUR"
+            )
           )
           expect(created_fees.first).to have_attributes(
-            group: europe,
-            amount_cents: 10_000,
-            vat_amount_cents: 2000,
+            charge_filter: europe_filter,
             units: 2,
+            amount_cents: 10_000,
+            precise_amount_cents: 10_000.0,
+            taxes_precise_amount_cents: 0.0,
+            unit_amount_cents: 10_000,
+            precise_unit_amount: 100
           )
+
           expect(created_fees.second).to have_attributes(
-            group: usa,
+            charge_filter: usa_filter,
             amount_cents: 5000,
-            vat_amount_cents: 1000,
+            precise_amount_cents: 5_000.0,
+            taxes_precise_amount_cents: 0.0,
             units: 1,
+            unit_amount_cents: 5000,
+            precise_unit_amount: 50
           )
+
           expect(created_fees.third).to have_attributes(
-            group: france,
+            charge_filter: france_filter,
             amount_cents: 0,
-            vat_amount_cents: 0,
+            precise_amount_cents: 0.0,
+            taxes_precise_amount_cents: 0.0,
             units: 1,
+            unit_amount_cents: 0,
+            precise_unit_amount: 0
           )
         end
       end
     end
 
-    context 'with percentage charge and presence of groups' do
-      let(:europe) do
-        create(:group, billable_metric_id: billable_metric.id, key: 'region', value: 'europe')
+    context "with percentage charge and presence of filters" do
+      let(:region) do
+        create(:billable_metric_filter, billable_metric:, key: "region", values: %w[europe usa])
       end
 
-      let(:usa) do
-        create(:group, billable_metric_id: billable_metric.id, key: 'region', value: 'usa')
+      let(:country) do
+        create(:billable_metric_filter, billable_metric:, key: "country", values: %w[france])
       end
 
-      let(:france) do
-        create(:group, billable_metric_id: billable_metric.id, key: 'country', value: 'france')
+      let(:europe_filter) do
+        create(
+          :charge_filter,
+          charge:,
+          properties: {rate: "2", fixed_amount: "1"}
+        )
+      end
+      let(:europe_filter_value) do
+        create(
+          :charge_filter_value,
+          charge_filter: europe_filter,
+          billable_metric_filter: region,
+          values: ["europe"]
+        )
+      end
+
+      let(:usa_filter) do
+        create(
+          :charge_filter,
+          charge:,
+          properties: {rate: "1", fixed_amount: "0"}
+        )
+      end
+      let(:usa_filter_value) do
+        create(:charge_filter_value, charge_filter: usa_filter, billable_metric_filter: region, values: ["usa"])
+      end
+
+      let(:france_filter) do
+        create(
+          :charge_filter,
+          charge:,
+          properties: {rate: "5", fixed_amount: "1"}
+        )
+      end
+      let(:france_filter_value) do
+        create(
+          :charge_filter_value,
+          charge_filter: france_filter,
+          billable_metric_filter: country,
+          values: ["france"]
+        )
       end
 
       let(:charge) do
         create(
           :percentage_charge,
           plan: subscription.plan,
-          billable_metric: billable_metric,
-          group_properties: [
-            build(
-              :group_property,
-              group: europe,
-              values: { rate: '2', fixed_amount: '1' },
-            ),
-            build(
-              :group_property,
-              group: usa,
-              values: { rate: '1', fixed_amount: '0' },
-            ),
-            build(
-              :group_property,
-              group: france,
-              values: { rate: '5', fixed_amount: '1' },
-            ),
-          ],
+          billable_metric:,
+          properties: {rate: "0", fixed_amount: "0"}
         )
       end
 
       before do
+        europe_filter_value
+        usa_filter_value
+        france_filter_value
+
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'usa', foo_bar: 12 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {foo_bar: 12}
         )
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'europe', foo_bar: 10 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "usa", foo_bar: 12}
         )
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'europe', foo_bar: 5 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "europe", foo_bar: 10}
         )
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { country: 'france', foo_bar: 5 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "europe", foo_bar: 5}
+        )
+        create(
+          :event,
+          organization: subscription.organization,
+          subscription:,
+          code: charge.billable_metric.code,
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {country: "france", foo_bar: 5}
         )
       end
 
-      it 'creates expected fees for count_agg aggregation type' do
+      it "creates expected fees for count_agg aggregation type" do
         billable_metric.update!(aggregation_type: :count_agg)
-        result = charge_subscription_service.create
+        result = charge_subscription_service.call
+        expect(result).to be_success
+        created_fees = result.fees
+
+        aggregate_failures do
+          expect(created_fees.count).to eq(4)
+          expect(created_fees).to all(
+            have_attributes(
+              invoice_id: invoice.id,
+              charge_id: charge.id,
+              amount_currency: "EUR"
+            )
+          )
+          expect(created_fees.first).to have_attributes(
+            charge_filter: europe_filter,
+            amount_cents: 200 + 2 * 2,
+            precise_amount_cents: 200.0 + 2 * 2,
+            taxes_precise_amount_cents: 0.0,
+            units: 2,
+            unit_amount_cents: 102,
+            precise_unit_amount: 1.02
+          )
+
+          expect(created_fees.second).to have_attributes(
+            charge_filter: usa_filter,
+            amount_cents: 1 * 1,
+            precise_amount_cents: 1.0 * 1,
+            taxes_precise_amount_cents: 0.0,
+            units: 1,
+            unit_amount_cents: 1,
+            precise_unit_amount: 0.01
+          )
+
+          expect(created_fees.third).to have_attributes(
+            charge_filter: france_filter,
+            amount_cents: 100 + 5 * 1,
+            precise_amount_cents: 100.0 + 5.0 * 1,
+            taxes_precise_amount_cents: 0.0,
+            units: 1,
+            unit_amount_cents: 105,
+            precise_unit_amount: 1.05
+          )
+        end
+      end
+    end
+
+    context "with graduated charge and presence of filters" do
+      let(:region) do
+        create(:billable_metric_filter, billable_metric:, key: "region", values: %w[europe usa])
+      end
+
+      let(:europe_filter) do
+        create(
+          :charge_filter,
+          charge:,
+          properties: {
+            graduated_ranges: [
+              {
+                from_value: 0,
+                to_value: nil,
+                per_unit_amount: "0.01",
+                flat_amount: "0.01"
+              }
+            ]
+          }
+        )
+      end
+      let(:europe_filter_value) do
+        create(
+          :charge_filter_value,
+          charge_filter: europe_filter,
+          billable_metric_filter: region,
+          values: ["europe"]
+        )
+      end
+
+      let(:usa_filter) do
+        create(
+          :charge_filter,
+          charge:,
+          properties: {
+            graduated_ranges: [
+              {
+                from_value: 0,
+                to_value: nil,
+                per_unit_amount: "0.03",
+                flat_amount: "0.01"
+              }
+            ]
+          }
+        )
+      end
+      let(:usa_filter_value) do
+        create(:charge_filter_value, charge_filter: usa_filter, billable_metric_filter: region, values: ["usa"])
+      end
+
+      let(:charge) do
+        create(
+          :graduated_charge,
+          plan: subscription.plan,
+          billable_metric:,
+          properties: {
+            graduated_ranges: [
+              {
+                from_value: 0,
+                to_value: nil,
+                per_unit_amount: "0",
+                flat_amount: "0"
+              }
+            ]
+          }
+        )
+      end
+
+      before do
+        europe_filter_value
+        usa_filter_value
+
+        create(
+          :event,
+          organization: subscription.organization,
+          subscription:,
+          code: charge.billable_metric.code,
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {foo_bar: 12}
+        )
+        create(
+          :event,
+          organization: subscription.organization,
+          subscription:,
+          code: charge.billable_metric.code,
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "usa", foo_bar: 12}
+        )
+        create(
+          :event,
+          organization: subscription.organization,
+          subscription:,
+          code: charge.billable_metric.code,
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "europe", foo_bar: 10}
+        )
+        create(
+          :event,
+          organization: subscription.organization,
+          subscription:,
+          code: charge.billable_metric.code,
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "europe", foo_bar: 5}
+        )
+      end
+
+      it "creates expected fees for count_agg aggregation type" do
+        billable_metric.update!(aggregation_type: :count_agg)
+        result = charge_subscription_service.call
         expect(result).to be_success
         created_fees = result.fees
 
@@ -747,284 +1563,505 @@ RSpec.describe Fees::ChargeService do
             have_attributes(
               invoice_id: invoice.id,
               charge_id: charge.id,
-              amount_currency: 'EUR',
-              vat_rate: 20.0,
-            ),
+              amount_currency: "EUR"
+            )
           )
           expect(created_fees.first).to have_attributes(
-            group: europe,
-            amount_cents: 200 + 2 * 2,
-            vat_amount_cents: 41,
-            units: 2,
-          )
-          expect(created_fees.second).to have_attributes(
-            group: usa,
-            amount_cents: 1 * 1,
-            vat_amount_cents: 0,
-            units: 1,
-          )
-          expect(created_fees.third).to have_attributes(
-            group: france,
-            amount_cents: 100 + 5 * 1,
-            vat_amount_cents: 21,
-            units: 1,
-          )
-        end
-      end
-    end
-
-    context 'with graduated charge and presence of groups' do
-      let(:europe) do
-        create(:group, billable_metric_id: billable_metric.id, key: 'region', value: 'europe')
-      end
-
-      let(:usa) do
-        create(:group, billable_metric_id: billable_metric.id, key: 'region', value: 'usa')
-      end
-
-      let(:charge) do
-        create(
-          :graduated_charge,
-          plan: subscription.plan,
-          billable_metric: billable_metric,
-          group_properties: [
-            build(
-              :group_property,
-              group: europe,
-              values: {
-                graduated_ranges: [
-                  {
-                    from_value: 0,
-                    to_value: nil,
-                    per_unit_amount: '0.01',
-                    flat_amount: '0.01',
-                  },
-                ],
-              },
-            ),
-            build(
-              :group_property,
-              group: usa,
-              values: {
-                graduated_ranges: [
-                  {
-                    from_value: 0,
-                    to_value: nil,
-                    per_unit_amount: '0.03',
-                    flat_amount: '0.01',
-                  },
-                ],
-              },
-            ),
-          ],
-        )
-      end
-
-      before do
-        create(
-          :event,
-          organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
-          code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'usa', foo_bar: 12 },
-        )
-        create(
-          :event,
-          organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
-          code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'europe', foo_bar: 10 },
-        )
-        create(
-          :event,
-          organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
-          code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'europe', foo_bar: 5 },
-        )
-      end
-
-      it 'creates expected fees for count_agg aggregation type' do
-        billable_metric.update!(aggregation_type: :count_agg)
-        result = charge_subscription_service.create
-        expect(result).to be_success
-        created_fees = result.fees
-
-        aggregate_failures do
-          expect(created_fees.count).to eq(2)
-          expect(created_fees).to all(
-            have_attributes(
-              invoice_id: invoice.id,
-              charge_id: charge.id,
-              amount_currency: 'EUR',
-              vat_rate: 20.0,
-            ),
-          )
-          expect(created_fees.first).to have_attributes(
-            group: europe,
+            charge_filter: europe_filter,
             amount_cents: 3,
-            vat_amount_cents: 1,
+            precise_amount_cents: 3.0,
+            taxes_precise_amount_cents: 0.0,
             units: 2,
+            unit_amount_cents: 1,
+            precise_unit_amount: 0.015
           )
+
           expect(created_fees.second).to have_attributes(
-            group: usa,
+            charge_filter: usa_filter,
             amount_cents: 4,
-            vat_amount_cents: 1,
+            precise_amount_cents: 4.0,
+            taxes_precise_amount_cents: 0.0,
             units: 1,
+            unit_amount_cents: 4,
+            precise_unit_amount: 0.04
           )
         end
       end
     end
 
-    context 'with volume charge and presence of groups' do
-      let(:europe) do
-        create(:group, billable_metric_id: billable_metric.id, key: 'region', value: 'europe')
+    context "with volume charge and presence of filters" do
+      let(:region) do
+        create(:billable_metric_filter, billable_metric:, key: "region", values: %w[europe usa])
       end
 
-      let(:usa) do
-        create(:group, billable_metric_id: billable_metric.id, key: 'region', value: 'usa')
+      let(:europe_filter) do
+        create(
+          :charge_filter,
+          charge:,
+          properties: {
+            volume_ranges: [
+              {from_value: 0, to_value: nil, per_unit_amount: "2", flat_amount: "10"}
+            ]
+          }
+        )
+      end
+      let(:europe_filter_value) do
+        create(
+          :charge_filter_value,
+          charge_filter: europe_filter,
+          billable_metric_filter: region,
+          values: ["europe"]
+        )
+      end
+
+      let(:usa_filter) do
+        create(
+          :charge_filter,
+          charge:,
+          properties: {
+            volume_ranges: [
+              {from_value: 0, to_value: nil, per_unit_amount: "1", flat_amount: "10"}
+            ]
+          }
+        )
+      end
+      let(:usa_filter_value) do
+        create(:charge_filter_value, charge_filter: usa_filter, billable_metric_filter: region, values: ["usa"])
       end
 
       let(:charge) do
         create(
           :volume_charge,
           plan: subscription.plan,
-          billable_metric: billable_metric,
-          group_properties: [
-            build(
-              :group_property,
-              group: europe,
-              values: {
-                volume_ranges: [
-                  { from_value: 0, to_value: 100, per_unit_amount: '2', flat_amount: '10' },
-                ],
-              },
-            ),
-            build(
-              :group_property,
-              group: usa,
-              values: {
-                volume_ranges: [
-                  { from_value: 0, to_value: 100, per_unit_amount: '1', flat_amount: '10' },
-                ],
-              },
-            ),
-          ],
+          billable_metric:,
+          properties: {
+            volume_ranges: [
+              {from_value: 0, to_value: nil, per_unit_amount: "0", flat_amount: "0"}
+            ]
+          }
         )
       end
 
       before do
+        europe_filter_value
+        usa_filter_value
+
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'usa', foo_bar: 12 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {foo_bar: 12}
         )
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'europe', foo_bar: 10 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "usa", foo_bar: 12}
         )
         create(
           :event,
           organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
+          subscription:,
           code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-          properties: { region: 'europe', foo_bar: 5 },
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "europe", foo_bar: 10}
+        )
+        create(
+          :event,
+          organization: subscription.organization,
+          subscription:,
+          code: charge.billable_metric.code,
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "europe", foo_bar: 5}
         )
       end
 
-      it 'creates expected fees for count_agg aggregation type' do
+      it "creates expected fees for count_agg aggregation type" do
         billable_metric.update!(aggregation_type: :count_agg)
-        result = charge_subscription_service.create
+        result = charge_subscription_service.call
         expect(result).to be_success
         created_fees = result.fees
 
         aggregate_failures do
-          expect(created_fees.count).to eq(2)
+          expect(created_fees.count).to eq(3)
           expect(created_fees).to all(
             have_attributes(
               invoice_id: invoice.id,
               charge_id: charge.id,
-              amount_currency: 'EUR',
-              vat_rate: 20.0,
-            ),
+              amount_currency: "EUR"
+            )
           )
           expect(created_fees.first).to have_attributes(
-            group: europe,
+            charge_filter: europe_filter,
             amount_cents: 1400,
-            vat_amount_cents: 280,
+            precise_amount_cents: 1_400.0,
+            taxes_precise_amount_cents: 0.0,
             units: 2,
+            unit_amount_cents: 700,
+            precise_unit_amount: 7
           )
+
           expect(created_fees.second).to have_attributes(
-            group: usa,
+            charge_filter: usa_filter,
             amount_cents: 1100,
-            vat_amount_cents: 220,
+            precise_amount_cents: 1_100.0,
+            taxes_precise_amount_cents: 0.0,
             units: 1,
+            unit_amount_cents: 1100,
+            precise_unit_amount: 11
           )
         end
       end
     end
 
-    context 'with aggregation error' do
+    context "with graduated percentage charge and presence of filters" do
+      let(:region) do
+        create(:billable_metric_filter, billable_metric:, key: "region", values: %w[europe usa])
+      end
+
+      let(:europe_filter) do
+        create(
+          :charge_filter,
+          charge:,
+          properties: {
+            graduated_percentage_ranges: [
+              {
+                from_value: 0,
+                to_value: nil,
+                flat_amount: "0.01",
+                rate: "2"
+              }
+            ]
+          }
+        )
+      end
+      let(:europe_filter_value) do
+        create(
+          :charge_filter_value,
+          charge_filter: europe_filter,
+          billable_metric_filter: region,
+          values: ["europe"]
+        )
+      end
+
+      let(:usa_filter) do
+        create(
+          :charge_filter,
+          charge:,
+          properties: {
+            graduated_percentage_ranges: [
+              {
+                from_value: 0,
+                to_value: nil,
+                flat_amount: "0.01",
+                rate: "3"
+              }
+            ]
+          }
+        )
+      end
+      let(:usa_filter_value) do
+        create(:charge_filter_value, charge_filter: usa_filter, billable_metric_filter: region, values: ["usa"])
+      end
+
+      let(:charge) do
+        create(
+          :graduated_percentage_charge,
+          plan: subscription.plan,
+          billable_metric:,
+          properties: {
+            graduated_percentage_ranges: [
+              {
+                from_value: 0,
+                to_value: nil,
+                flat_amount: "1",
+                rate: "0"
+              }
+            ]
+          }
+        )
+      end
+
+      before do
+        europe_filter_value
+        usa_filter_value
+
+        create(
+          :event,
+          organization: subscription.organization,
+          subscription:,
+          code: charge.billable_metric.code,
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {foo_bar: 12}
+        )
+        create(
+          :event,
+          organization: subscription.organization,
+          subscription:,
+          code: charge.billable_metric.code,
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "usa", foo_bar: 12}
+        )
+        create(
+          :event,
+          organization: subscription.organization,
+          subscription:,
+          code: charge.billable_metric.code,
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "europe", foo_bar: 10}
+        )
+        create(
+          :event,
+          organization: subscription.organization,
+          subscription:,
+          code: charge.billable_metric.code,
+          timestamp: Time.zone.parse("2022-03-16"),
+          properties: {region: "europe", foo_bar: 5}
+        )
+      end
+
+      it "creates expected fees for count_agg aggregation type" do
+        billable_metric.update!(aggregation_type: :count_agg)
+        result = charge_subscription_service.call
+        expect(result).to be_success
+        created_fees = result.fees
+
+        aggregate_failures do
+          expect(created_fees.count).to eq(3)
+          expect(created_fees).to all(
+            have_attributes(
+              invoice_id: invoice.id,
+              charge_id: charge.id,
+              amount_currency: "EUR"
+            )
+          )
+          expect(created_fees.first).to have_attributes(
+            charge_filter: europe_filter,
+            amount_cents: 5, # 2 × 0.02 + 0.01
+            precise_amount_cents: 5.0,
+            taxes_precise_amount_cents: 0.0,
+            units: 2,
+            unit_amount_cents: 2,
+            precise_unit_amount: 0.025
+          )
+
+          expect(created_fees.second).to have_attributes(
+            charge_filter: usa_filter,
+            amount_cents: 4, # 1 × 0.03 + 0.01
+            precise_amount_cents: 4.0,
+            taxes_precise_amount_cents: 0.0,
+            units: 1,
+            unit_amount_cents: 4,
+            precise_unit_amount: 0.04
+          )
+        end
+      end
+    end
+
+    context "with true-up fee and presence of filters" do
+      let(:region) do
+        create(:billable_metric_filter, billable_metric:, key: "region", values: %w[europe usa])
+      end
+
+      let(:europe_filter) do
+        create(
+          :charge_filter,
+          charge:,
+          properties: {amount: "20"}
+        )
+      end
+      let(:europe_filter_value) do
+        create(
+          :charge_filter_value,
+          charge_filter: europe_filter,
+          billable_metric_filter: region,
+          values: ["europe"]
+        )
+      end
+
+      let(:usa_filter) do
+        create(
+          :charge_filter,
+          charge:,
+          properties: {amount: "50"}
+        )
+      end
+      let(:usa_filter_value) do
+        create(:charge_filter_value, charge_filter: usa_filter, billable_metric_filter: region, values: ["usa"])
+      end
+
+      let(:charge) do
+        create(
+          :standard_charge,
+          plan: subscription.plan,
+          billable_metric:,
+          min_amount_cents: 1000,
+          properties: {amount: "0"}
+        )
+      end
+
+      before do
+        europe_filter_value
+        usa_filter_value
+      end
+
+      it "creates two fees" do
+        travel_to(Time.zone.parse("2023-04-01")) do
+          result = charge_subscription_service.call
+
+          aggregate_failures do
+            expect(result).to be_success
+            expect(result.fees.count).to eq(2)
+
+            # 548 is 1000 prorated for 17 days.
+            expect(result.fees.pluck(:amount_cents)).to contain_exactly(0, 548)
+            expect(result.fees.pluck(:precise_amount_cents)).to contain_exactly(0, 548.3870967741935)
+            expect(result.fees.pluck(:taxes_precise_amount_cents)).to contain_exactly(0.0, 0.0)
+          end
+        end
+      end
+    end
+
+    context "with recurring weighted sum aggregation" do
+      let(:context) { :recurring }
+      let(:billable_metric) { create(:weighted_sum_billable_metric, :recurring, organization:) }
+
+      it "creates a fee and a cached aggregation" do
+        result = charge_subscription_service.call
+        expect(result).to be_success
+        created_fee = result.fees.first
+        cached_aggregation = result.cached_aggregations.first
+
+        aggregate_failures do
+          expect(created_fee.id).not_to be_nil
+          expect(created_fee.invoice_id).to eq(invoice.id)
+          expect(created_fee.charge_id).to eq(charge.id)
+          expect(created_fee.amount_cents).to eq(0)
+          expect(created_fee.precise_amount_cents).to eq(0.0)
+          expect(created_fee.taxes_precise_amount_cents).to eq(0.0)
+          expect(created_fee.amount_currency).to eq("EUR")
+          expect(created_fee.units).to eq(0)
+          expect(created_fee.total_aggregated_units).to eq(0)
+          expect(created_fee.events_count).to eq(0)
+          expect(created_fee.payment_status).to eq("pending")
+
+          expect(cached_aggregation.id).not_to be_nil
+          expect(cached_aggregation.organization).to eq(organization)
+          expect(cached_aggregation.external_subscription_id).to eq(subscription.external_id)
+          expect(cached_aggregation.charge_filter_id).to be_nil
+          expect(cached_aggregation.charge_id).to eq(charge.id)
+          expect(cached_aggregation.timestamp).to eq(boundaries[:from_datetime])
+          expect(cached_aggregation.current_aggregation).to eq(0.0)
+        end
+      end
+    end
+
+    context "with aggregation error" do
       let(:billable_metric) do
         create(
           :billable_metric,
-          aggregation_type: 'max_agg',
-          field_name: 'foo_bar',
+          aggregation_type: "max_agg",
+          field_name: "foo_bar"
         )
       end
       let(:aggregator_service) { instance_double(BillableMetrics::Aggregations::MaxService) }
       let(:error_result) do
-        BaseService::Result.new.service_failure!(code: 'aggregation_failure', message: 'Test message')
+        BaseService::Result.new.service_failure!(code: "aggregation_failure", message: "Test message")
       end
 
-      it 'returns an error' do
+      it "returns an error" do
         allow(BillableMetrics::Aggregations::MaxService).to receive(:new)
           .and_return(aggregator_service)
         allow(aggregator_service).to receive(:aggregate)
           .and_return(error_result)
 
-        result = charge_subscription_service.create
+        result = charge_subscription_service.call
 
         expect(result).not_to be_success
         expect(result.error).to be_a(BaseService::ServiceFailure)
-        expect(result.error.code).to eq('aggregation_failure')
-        expect(result.error.error_message).to eq('Test message')
+        expect(result.error.code).to eq("aggregation_failure")
+        expect(result.error.error_message).to eq("Test message")
 
         expect(BillableMetrics::Aggregations::MaxService).to have_received(:new)
         expect(aggregator_service).to have_received(:aggregate)
       end
     end
-  end
 
-  describe '.current_usage' do
-    context 'with all types of aggregation' do
-      BillableMetric::AGGREGATION_TYPES.each do |aggregation_type|
-        before do
-          billable_metric.update!(
-            aggregation_type: aggregation_type,
-            field_name: 'foo_bar',
+    context "when current usage" do
+      let(:context) { :current_usage }
+
+      context "with all types of aggregation" do
+        BillableMetric::AGGREGATION_TYPES.keys.each do |aggregation_type|
+          before do
+            billable_metric.update!(
+              aggregation_type:,
+              field_name: "foo_bar",
+              weighted_interval: "seconds",
+              custom_aggregator: "def aggregate(event, agg, aggregation_properties); agg; end"
+            )
+
+            charge.update!(min_amount_cents: 1000)
+          end
+
+          it "initializes fees" do
+            result = charge_subscription_service.call
+
+            expect(result).to be_success
+
+            usage_fee = result.fees.first
+
+            aggregate_failures do
+              expect(result.fees.count).to eq(1)
+              expect(usage_fee.id).to be_nil
+              expect(usage_fee.invoice_id).to eq(invoice.id)
+              expect(usage_fee.charge_id).to eq(charge.id)
+              expect(usage_fee.amount_cents).to eq(0)
+              expect(usage_fee.precise_amount_cents).to eq(0.0)
+              expect(usage_fee.taxes_precise_amount_cents).to eq(0.0)
+              expect(usage_fee.amount_currency).to eq("EUR")
+              expect(usage_fee.units).to eq(0)
+            end
+          end
+        end
+      end
+
+      context "with graduated charge model" do
+        let(:charge) do
+          create(
+            :graduated_charge,
+            plan: subscription.plan,
+            charge_model: "graduated",
+            billable_metric:,
+            properties: {
+              graduated_ranges: [
+                {
+                  from_value: 0,
+                  to_value: nil,
+                  per_unit_amount: "0.01",
+                  flat_amount: "0.01"
+                }
+              ]
+            }
           )
         end
 
-        it 'initializes fees' do
-          result = charge_subscription_service.current_usage
+        before do
+          create_list(
+            :event,
+            4,
+            organization: subscription.organization,
+            subscription:,
+            code: charge.billable_metric.code,
+            timestamp: Time.zone.parse("2022-03-16")
+          )
+        end
+
+        it "initialize a fee" do
+          result = charge_subscription_service.call
 
           expect(result).to be_success
 
@@ -1034,96 +2071,83 @@ RSpec.describe Fees::ChargeService do
             expect(usage_fee.id).to be_nil
             expect(usage_fee.invoice_id).to eq(invoice.id)
             expect(usage_fee.charge_id).to eq(charge.id)
-            expect(usage_fee.amount_cents).to eq(0)
-            expect(usage_fee.amount_currency).to eq('EUR')
-            expect(usage_fee.vat_amount_cents).to eq(0)
-            expect(usage_fee.vat_rate).to eq(20.0)
-            expect(usage_fee.units).to eq(0)
+            expect(usage_fee.amount_cents).to eq(5)
+            expect(usage_fee.precise_amount_cents).to eq(5.0)
+            expect(usage_fee.taxes_precise_amount_cents).to eq(0.0)
+            expect(usage_fee.amount_currency).to eq("EUR")
+            expect(usage_fee.units.to_s).to eq("4.0")
           end
         end
       end
-    end
 
-    context 'with graduated charge model' do
-      let(:charge) do
-        create(
-          :graduated_charge,
-          plan: subscription.plan,
-          charge_model: 'graduated',
-          billable_metric: billable_metric,
-          properties: {
-            graduated_ranges: [
-              {
-                from_value: 0,
-                to_value: nil,
-                per_unit_amount: '0.01',
-                flat_amount: '0.01',
-              },
-            ],
-          },
-        )
-      end
+      context "with aggregation error" do
+        let(:billable_metric) do
+          create(
+            :billable_metric,
+            aggregation_type: "max_agg",
+            field_name: "foo_bar"
+          )
+        end
+        let(:aggregator_service) { instance_double(BillableMetrics::Aggregations::MaxService) }
+        let(:error_result) do
+          BaseService::Result.new.service_failure!(code: "aggregation_failure", message: "Test message")
+        end
 
-      before do
-        create_list(
-          :event,
-          4,
-          organization: subscription.organization,
-          customer: subscription.customer,
-          subscription: subscription,
-          code: charge.billable_metric.code,
-          timestamp: DateTime.parse('2022-03-16'),
-        )
-      end
+        it "returns an error" do
+          allow(BillableMetrics::Aggregations::MaxService).to receive(:new)
+            .and_return(aggregator_service)
+          allow(aggregator_service).to receive(:aggregate)
+            .and_return(error_result)
 
-      it 'initialize a fee' do
-        result = charge_subscription_service.current_usage
+          result = charge_subscription_service.call
 
-        expect(result).to be_success
+          expect(result).not_to be_success
+          expect(result.error).to be_a(BaseService::ServiceFailure)
+          expect(result.error.code).to eq("aggregation_failure")
+          expect(result.error.error_message).to eq("Test message")
 
-        usage_fee = result.fees.first
-
-        aggregate_failures do
-          expect(usage_fee.id).to be_nil
-          expect(usage_fee.invoice_id).to eq(invoice.id)
-          expect(usage_fee.charge_id).to eq(charge.id)
-          expect(usage_fee.amount_cents).to eq(5)
-          expect(usage_fee.amount_currency).to eq('EUR')
-          expect(usage_fee.vat_amount_cents).to eq(1)
-          expect(usage_fee.vat_rate).to eq(20.0)
-          expect(usage_fee.units.to_s).to eq('4.0')
+          expect(BillableMetrics::Aggregations::MaxService).to have_received(:new)
+          expect(aggregator_service).to have_received(:aggregate)
         end
       end
     end
 
-    context 'with aggregation error' do
-      let(:billable_metric) do
+    context "when apply taxes" do
+      let(:apply_taxes) { true }
+
+      before do
+        create(:tax, organization:, rate: 20)
+
         create(
-          :billable_metric,
-          aggregation_type: 'max_agg',
-          field_name: 'foo_bar',
+          :event,
+          organization: invoice.organization,
+          subscription:,
+          code: billable_metric.code,
+          timestamp: boundaries[:charges_to_datetime] - 2.days
         )
       end
-      let(:aggregator_service) { instance_double(BillableMetrics::Aggregations::MaxService) }
-      let(:error_result) do
-        BaseService::Result.new.service_failure!(code: 'aggregation_failure', message: 'Test message')
-      end
 
-      it 'returns an error' do
-        allow(BillableMetrics::Aggregations::MaxService).to receive(:new)
-          .and_return(aggregator_service)
-        allow(aggregator_service).to receive(:aggregate)
-          .and_return(error_result)
+      it "creates a fee with applied taxes" do
+        result = charge_subscription_service.call
+        expect(result).to be_success
+        expect(result.fees.first).to have_attributes(
+          id: String,
+          invoice_id: invoice.id,
+          charge_id: charge.id,
+          amount_cents: 2000,
+          precise_amount_cents: 2000.0,
+          amount_currency: "EUR",
+          units: 1,
+          unit_amount_cents: 2000,
+          precise_unit_amount: 20.0,
+          events_count: 1,
+          payment_status: "pending",
 
-        result = charge_subscription_service.current_usage
-
-        expect(result).not_to be_success
-        expect(result.error).to be_a(BaseService::ServiceFailure)
-        expect(result.error.code).to eq('aggregation_failure')
-        expect(result.error.error_message).to eq('Test message')
-
-        expect(BillableMetrics::Aggregations::MaxService).to have_received(:new)
-        expect(aggregator_service).to have_received(:aggregate)
+          taxes_rate: 20.0,
+          taxes_amount_cents: 400,
+          taxes_precise_amount_cents: 400.0
+        )
+        expect(result.fees.first.applied_taxes.count).to eq(1)
       end
     end
   end

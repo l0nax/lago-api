@@ -2,10 +2,10 @@
 
 class UsersService < BaseService
   def login(email, password)
-    result.user = User.find_by(email: email)&.authenticate(password)
+    result.user = User.find_by(email:)&.authenticate(password)
 
     unless result.user.present? && result.user.memberships&.active&.any?
-      return result.single_validation_failure!(error_code: 'incorrect_login_or_password')
+      return result.single_validation_failure!(error_code: "incorrect_login_or_password")
     end
 
     result.token = generate_token if result.user
@@ -17,18 +17,33 @@ class UsersService < BaseService
   end
 
   def register(email, password, organization_name)
-    result.user = User.find_or_initialize_by(email: email)
+    if ENV.fetch("LAGO_DISABLE_SIGNUP", "false") == "true"
+      return result.not_allowed_failure!(code: "signup_disabled")
+    end
 
-    if result.user.id
-      result.single_validation_failure!(field: :email, error_code: 'user_already_exists')
+    if User.exists?(email:)
+      result.single_validation_failure!(field: :email, error_code: "user_already_exists")
 
       return result
     end
 
     ActiveRecord::Base.transaction do
-      result.organization = Organization.create!(name: organization_name)
+      result.user = User.create!(email:, password:)
 
-      create_user_and_membership(result, password)
+      result.organization = Organizations::CreateService
+        .call(name: organization_name, document_numbering: "per_organization")
+        .raise_if_error!
+        .organization
+
+      result.membership = Membership.create!(
+        user: result.user,
+        organization: result.organization,
+        role: :admin
+      )
+
+      result.token = generate_token
+    rescue ActiveRecord::RecordInvalid => e
+      result.record_validation_failure!(record: e.record)
     end
 
     SegmentIdentifyJob.perform_later(membership_id: "membership/#{result.membership.id}")
@@ -37,13 +52,20 @@ class UsersService < BaseService
     result
   end
 
-  def register_from_invite(email, password, organization_id)
-    result.user = User.find_or_initialize_by(email: email)
-
+  def register_from_invite(invite, password)
     ActiveRecord::Base.transaction do
-      result.organization = Organization.find(organization_id)
+      result.user = User.find_or_create_by!(email: invite.email) { |u| u.password = password }
+      result.organization = invite.organization
 
-      create_user_and_membership(result, password)
+      result.membership = Membership.create!(
+        user: result.user,
+        organization: result.organization,
+        role: invite.role
+      )
+
+      result.token = generate_token
+    rescue ActiveRecord::RecordInvalid => e
+      result.record_validation_failure!(record: e.record)
     end
 
     result
@@ -57,45 +79,27 @@ class UsersService < BaseService
 
   private
 
-  def create_user_and_membership(result, password)
-    ActiveRecord::Base.transaction do
-      result.user.password = password
-      result.user.save!
-
-      result.token = generate_token
-
-      result.membership = Membership.create!(
-        user: result.user,
-        organization: result.organization,
-      )
-
-      result
-    end
-  rescue ActiveRecord::RecordInvalid => e
-    result.record_validation_failure!(record: e.record)
-  end
-
   def generate_token
-    JWT.encode(payload, ENV['SECRET_KEY_BASE'], 'HS256')
-  rescue StandardError => e
-    result.service_failure!(code: 'token_encoding_error', message: e.message)
+    JWT.encode(payload, ENV["SECRET_KEY_BASE"], "HS256")
+  rescue => e
+    result.service_failure!(code: "token_encoding_error", message: e.message)
   end
 
   def payload
     {
       sub: result.user.id,
-      exp: Time.now.to_i + 8640, # 6 hours expiration
+      exp: Time.now.to_i + 8640 # 6 hours expiration
     }
   end
 
   def track_organization_registered(organization, membership)
     SegmentTrackJob.perform_later(
       membership_id: "membership/#{membership.id}",
-      event: 'organization_registered',
+      event: "organization_registered",
       properties: {
         organization_name: organization.name,
-        organization_id: organization.id,
-      },
+        organization_id: organization.id
+      }
     )
   end
 end

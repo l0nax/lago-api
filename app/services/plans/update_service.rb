@@ -9,18 +9,21 @@ module Plans
     end
 
     def call
-      return result.not_found_failure!(resource: 'plan') unless plan
+      return result.not_found_failure!(resource: "plan") unless plan
+
+      old_amount_cents = plan.amount_cents
 
       plan.name = params[:name] if params.key?(:name)
+      plan.invoice_display_name = params[:invoice_display_name] if params.key?(:invoice_display_name)
       plan.description = params[:description] if params.key?(:description)
+      plan.amount_cents = params[:amount_cents] if params.key?(:amount_cents)
 
-      # NOTE: Only name and description are editable if plan
-      #       is attached to subscriptions
+      # NOTE: If plan is attached to subscriptions the editable attributes are:
+      #       name, invoice_display_name, description, amount_cents
       unless plan.attached_to_subscriptions?
         plan.code = params[:code] if params.key?(:code)
         plan.interval = params[:interval].to_sym if params.key?(:interval)
         plan.pay_in_advance = params[:pay_in_advance] if params.key?(:pay_in_advance)
-        plan.amount_cents = params[:amount_cents] if params.key?(:amount_cents)
         plan.amount_currency = params[:amount_currency] if params.key?(:amount_currency)
         plan.trial_period = params[:trial_period] if params.key?(:trial_period)
         plan.bill_charges_monthly = bill_charges_monthly?
@@ -29,20 +32,49 @@ module Plans
       if params[:charges].present?
         metric_ids = params[:charges].map { |c| c[:billable_metric_id] }.uniq
         if metric_ids.present? && organization.billable_metrics.where(id: metric_ids).count != metric_ids.count
-          return result.not_found_failure!(resource: 'billable_metrics')
+          return result.not_found_failure!(resource: "billable_metrics")
         end
       end
 
       ActiveRecord::Base.transaction do
         plan.save!
 
+        if params[:tax_codes]
+          taxes_result = Plans::ApplyTaxesService.call(plan:, tax_codes: params[:tax_codes])
+          taxes_result.raise_if_error!
+        end
+
         process_charges(plan, params[:charges]) if params[:charges]
+
+        if params.key?(:usage_thresholds) &&
+            License.premium? &&
+            plan.organization.progressive_billing_enabled?
+
+          if params[:usage_thresholds].empty?
+            plan.usage_thresholds.discard_all
+          else
+            process_usage_thresholds(plan, params[:usage_thresholds])
+          end
+        end
+
+        process_minimum_commitment(plan, params[:minimum_commitment]) if params[:minimum_commitment] && License.premium?
+
+        if old_amount_cents != plan.amount_cents
+          process_downgraded_subscriptions
+          process_pending_subscriptions
+        end
       end
 
-      result.plan = plan
+      cascade_subscription_fee_update(old_amount_cents)
+
+      plan.invoices.draft.update_all(ready_to_be_refreshed: true) # rubocop:disable Rails/SkipsModelValidations
+
+      result.plan = plan.reload
       result
     rescue ActiveRecord::RecordInvalid => e
       result.record_validation_failure!(record: e.record)
+    rescue BaseService::FailedResult => e
+      e.result
     end
 
     private
@@ -57,14 +89,140 @@ module Plans
       params[:bill_charges_monthly] || false
     end
 
-    def create_charge(plan, params)
-      plan.charges.create!(
-        billable_metric_id: params[:billable_metric_id],
-        amount_currency: params[:amount_currency],
-        charge_model: params[:charge_model]&.to_sym,
-        properties: params[:properties] || {},
-        group_properties: (params[:group_properties] || []).map { |gp| GroupProperty.new(gp) },
+    def cascade_subscription_fee_update(old_amount_cents)
+      return unless cascade?
+      return if old_amount_cents == plan.amount_cents
+      return if plan.children.empty?
+
+      plan.children.where(amount_cents: old_amount_cents).find_each do |p|
+        Plans::UpdateAmountJob.perform_later(plan: p, amount_cents: plan.amount_cents, expected_amount_cents: old_amount_cents)
+      end
+    end
+
+    def cascade_charge_creation(payload_charge)
+      return unless cascade?
+      return if plan.children.empty?
+
+      plan.children.find_each do |p|
+        Charges::CreateJob.perform_later(plan: p, params: payload_charge)
+      end
+    end
+
+    def cascade_charge_removal(charge)
+      return unless cascade?
+      return if plan.children.empty?
+
+      plan.children.includes(:charges).find_each do |p|
+        child_charge = p.charges.find { |c| c.parent_id == charge.id }
+
+        Charges::DestroyJob.perform_later(charge: child_charge) if child_charge
+      end
+    end
+
+    def cascade_charge_update(charge, payload_charge)
+      return unless cascade?
+      return if plan.children.empty?
+
+      plan.children.includes(:charges).find_each do |p|
+        child_charge = p.charges.find { |c| c.parent_id == charge.id }
+
+        if child_charge
+          Charges::UpdateJob.perform_later(
+            charge: child_charge,
+            params: payload_charge,
+            cascade_options: {
+              cascade: true,
+              parent_filters: charge.filters.map(&:attributes),
+              equal_properties: charge.equal_properties?(child_charge)
+            }
+          )
+        end
+      end
+    end
+
+    def cascade?
+      ActiveModel::Type::Boolean.new.cast(params[:cascade_updates])
+    end
+
+    def create_usage_threshold(plan, params)
+      usage_threshold = plan.usage_thresholds.find_or_initialize_by(
+        recurring: params[:recurring] || false,
+        amount_cents: params[:amount_cents]
       )
+
+      existing_recurring_threshold = plan.usage_thresholds.recurring.first
+
+      if params[:recurring] && existing_recurring_threshold
+        usage_threshold = existing_recurring_threshold
+      end
+
+      usage_threshold.threshold_display_name = params[:threshold_display_name]
+      usage_threshold.amount_cents = params[:amount_cents]
+
+      usage_threshold.save!
+      usage_threshold
+    end
+
+    def process_minimum_commitment(plan, params)
+      if params.present?
+        minimum_commitment = plan.minimum_commitment || Commitment.new(plan:, commitment_type: "minimum_commitment")
+
+        minimum_commitment.amount_cents = params[:amount_cents] if params.key?(:amount_cents)
+        minimum_commitment.invoice_display_name = params[:invoice_display_name] if params.key?(:invoice_display_name)
+        minimum_commitment.save!
+      end
+      plan.minimum_commitment.destroy! if params.blank? && plan.minimum_commitment
+
+      if params[:tax_codes]
+        taxes_result = Commitments::ApplyTaxesService.call(
+          commitment: minimum_commitment,
+          tax_codes: params[:tax_codes]
+        )
+        taxes_result.raise_if_error!
+      end
+
+      minimum_commitment
+    end
+
+    def process_usage_thresholds(plan, params_thresholds)
+      created_thresholds_ids = []
+
+      hash_thresholds = params_thresholds.map { |c| c.to_h.deep_symbolize_keys }
+      hash_thresholds.each do |payload_threshold|
+        usage_threshold = plan.usage_thresholds.find_by(id: payload_threshold[:id])
+
+        if usage_threshold
+          if payload_threshold.key?(:threshold_display_name)
+            usage_threshold.threshold_display_name = payload_threshold[:threshold_display_name]
+          end
+
+          if payload_threshold.key?(:amount_cents)
+            usage_threshold.amount_cents = payload_threshold[:amount_cents]
+          end
+
+          if payload_threshold.key?(:recurring)
+            usage_threshold.recurring = payload_threshold[:recurring]
+          end
+
+          # This means that in the UI we just removed an existing threshold
+          # and then just re-added a threshold (which no longer has an id) with the same amount
+          # so we discard the existing one and we're inserting a new one instead
+          if !usage_threshold.valid? && usage_threshold.errors.where(:amount_cents, :taken).present?
+            usage_threshold.discard!
+          else
+            usage_threshold.save!
+            next
+          end
+        end
+
+        plan = plan.reload
+
+        created_threshold = create_usage_threshold(plan, payload_threshold)
+        created_thresholds_ids.push(created_threshold.id)
+      end
+
+      # NOTE: Delete thresholds that are no more linked to the plan
+      sanitize_thresholds(plan, hash_thresholds, created_thresholds_ids)
     end
 
     def process_charges(plan, params_charges)
@@ -72,21 +230,20 @@ module Plans
 
       hash_charges = params_charges.map { |c| c.to_h.deep_symbolize_keys }
       hash_charges.each do |payload_charge|
-        charge = Charge.find_by(id: payload_charge[:id])
+        charge = plan.charges.find_by(id: payload_charge[:id])
 
         if charge
-          # NOTE: charges cannot be edited if plan is attached to a subscription
-          unless plan.attached_to_subscriptions?
-            payload_charge[:group_properties]&.map! { |gp| GroupProperty.new(gp) }
-            charge.update(payload_charge)
-            charge
-          end
+          cascade_charge_update(charge, payload_charge)
+          Charges::UpdateService.call(charge:, params: payload_charge).raise_if_error!
 
           next
         end
 
-        created_charge = create_charge(plan, payload_charge)
-        created_charges_ids.push(created_charge.id)
+        create_charge_result = Charges::CreateService.call(plan:, params: payload_charge)
+        create_charge_result.raise_if_error!
+
+        after_commit { cascade_charge_creation(payload_charge.merge(parent_id: create_charge_result.charge.id)) }
+        created_charges_ids.push(create_charge_result.charge.id)
       end
 
       # NOTE: Delete charges that are no more linked to the plan
@@ -94,20 +251,47 @@ module Plans
     end
 
     def sanitize_charges(plan, args_charges, created_charges_ids)
-      args_charges_ids = args_charges.reject { |c| c[:id].nil? }.map { |c| c[:id] }
+      args_charges_ids = args_charges.map { |c| c[:id] }.compact
       charges_ids = plan.charges.pluck(:id) - args_charges_ids - created_charges_ids
-      charges_ids.each { |id| discard_charge!(Charge.find_by(id:)) }
+      plan.charges.where(id: charges_ids).find_each do |charge|
+        cascade_charge_removal(charge)
+        Charges::DestroyService.call(charge:)
+      end
     end
 
-    def discard_charge!(charge)
-      draft_invoice_ids = Invoice.draft.joins(plans: [:charges])
-        .where(charges: { id: charge.id }).distinct.pluck(:id)
+    def sanitize_thresholds(plan, args_thresholds, created_thresholds_ids)
+      args_thresholds_ids = args_thresholds.map { |c| c[:id] }.compact
+      thresholds_ids = plan.usage_thresholds.pluck(:id) - args_thresholds_ids - created_thresholds_ids
+      plan.usage_thresholds.where(id: thresholds_ids).discard_all
+    end
 
-      charge.discard!
-      charge.group_properties.discard_all
+    # NOTE: We should remove pending subscriptions
+    #       if plan has been downgraded but amount cents became less than downgraded value. This pending subscription
+    #       is not relevant in this case and downgrade should be ignored
+    def process_downgraded_subscriptions
+      return unless plan.subscriptions.active.exists?
 
-      # NOTE: Refresh all draft invoices asynchronously.
-      Invoices::RefreshBatchJob.perform_later(draft_invoice_ids)
+      Subscription.where(previous_subscription: plan.subscriptions.active, status: :pending).find_each do |sub|
+        sub.mark_as_canceled! if plan.amount_cents < sub.plan.amount_cents
+      end
+    end
+
+    # NOTE: If new plan yearly amount is higher than its value before the update
+    #       and there are pending subscriptions for the plan,
+    #       this is a plan upgrade, old subscription must be terminated and billed
+    #       new subscription with updated plan must be activated inmediately.
+    def process_pending_subscriptions
+      Subscription.where(plan:, status: :pending).find_each do |subscription|
+        next unless subscription.previous_subscription
+
+        if plan.yearly_amount_cents >= subscription.previous_subscription.plan.yearly_amount_cents
+          Subscriptions::PlanUpgradeService.call(
+            current_subscription: subscription.previous_subscription,
+            plan: plan,
+            params: {name: subscription.name}
+          ).raise_if_error!
+        end
+      end
     end
   end
 end

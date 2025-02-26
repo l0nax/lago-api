@@ -21,9 +21,10 @@ amazon_compatible_endpoint:
   bucket: <%= ENV['LAGO_AWS_S3_BUCKET'] %>
   region: <%= ENV['LAGO_AWS_S3_REGION'] %>
   force_path_style: <%= ENV.fetch('LAGO_AWS_S3_PATH_STYLE', false) %>
+  ssl_verify_peer: <%= ENV.fetch('LAGO_AWS_S3_SSL_VERIFY', true) %>
 
 google:
   service: GCS
-  credentials: <%= Rails.root.join('gcs_keyfile.json') %>
+  credentials: <%= ENV.fetch('LAGO_GCS_KEYFILE_JSON_PATH', Rails.root.join('gcs_keyfile.json')) %>
   project: <%= ENV['LAGO_GCS_PROJECT'] %>
   bucket: <%= ENV['LAGO_GCS_BUCKET'] %>

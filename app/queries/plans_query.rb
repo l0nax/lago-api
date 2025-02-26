@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
 class PlansQuery < BaseQuery
-  def call(search_term:, page:, limit:, filters: {})
-    @search_term = search_term
-
+  def call
     plans = base_scope.result
-    plans = plans.where(id: filters[:ids]) if filters[:ids].present?
-    plans = plans.order(created_at: :desc).page(page).per(limit)
+    plans = paginate(plans)
+    plans = apply_consistent_ordering(plans)
+
+    plans = exclude_pending_deletion(plans) unless filters.include_pending_deletion
 
     result.plans = plans
     result
@@ -14,19 +14,21 @@ class PlansQuery < BaseQuery
 
   private
 
-  attr_reader :search_term
-
   def base_scope
-    Plan.where(organization:).where(pending_deletion: false).ransack(search_params)
+    Plan.parents.where(organization:).ransack(search_params)
   end
 
   def search_params
-    return nil if search_term.blank?
+    return if search_term.blank?
 
     {
-      m: 'or',
+      m: "or",
       name_cont: search_term,
-      code_cont: search_term,
+      code_cont: search_term
     }
+  end
+
+  def exclude_pending_deletion(scope)
+    scope.where(pending_deletion: false)
   end
 end

@@ -7,6 +7,7 @@ module V1
         lago_id: model.id,
         name: model.name,
         code: model.code,
+        description: model.description,
         coupon_type: model.coupon_type,
         amount_cents: model.amount_cents,
         amount_currency: model.amount_currency,
@@ -15,19 +16,14 @@ module V1
         frequency_duration: model.frequency_duration,
         reusable: model.reusable,
         limited_plans: model.limited_plans,
+        limited_billable_metrics: model.limited_billable_metrics,
         plan_codes: model.plans.pluck(:code),
+        billable_metric_codes: model.billable_metrics.pluck(:code),
         created_at: model.created_at.iso8601,
         expiration: model.expiration,
         expiration_at: model.expiration_at&.iso8601,
-      }.merge(legacy_values)
-    end
-
-    private
-
-    def legacy_values
-      ::V1::Legacy::CouponSerializer.new(
-        model,
-      ).serialize
+        terminated_at: model.terminated_at&.iso8601
+      }
     end
   end
 end

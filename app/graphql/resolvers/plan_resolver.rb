@@ -5,18 +5,18 @@ module Resolvers
     include AuthenticableApiUser
     include RequiredOrganization
 
-    description 'Query a single plan of an organization'
+    REQUIRED_PERMISSION = "plans:view"
 
-    argument :id, ID, required: true, description: 'Uniq ID of the plan'
+    description "Query a single plan of an organization"
 
-    type Types::Plans::SingleObject, null: true
+    argument :id, ID, required: true, description: "Uniq ID of the plan"
+
+    type Types::Plans::Object, null: true
 
     def resolve(id: nil)
-      validate_organization!
-
       current_organization.plans.find(id)
     rescue ActiveRecord::RecordNotFound
-      not_found_error(resource: 'plan')
+      not_found_error(resource: "plan")
     end
   end
 end

@@ -2,66 +2,85 @@
 
 module Invoices
   class PaidCreditService < BaseService
-    def initialize(wallet_transaction:, timestamp:)
+    def initialize(wallet_transaction:, timestamp:, invoice: nil)
       @customer = wallet_transaction.wallet.customer
       @wallet_transaction = wallet_transaction
       @timestamp = timestamp
 
-      super(nil)
+      # NOTE: In case of retry when the creation process failed,
+      #       and if the generating invoice was persisted,
+      #       the process can be retried without creating a new invoice
+      @invoice = invoice
+
+      super
     end
 
-    def create
+    def call
+      create_generating_invoice unless invoice
+      result.invoice = invoice
+
       ActiveRecord::Base.transaction do
-        invoice = Invoice.create!(
-          organization: customer.organization,
-          customer:,
-          issuing_date:,
-          invoice_type: :credit,
-          payment_status: :pending,
-          amount_currency: currency,
-          vat_amount_currency: currency,
-          credit_amount_currency: currency,
-          total_amount_currency: currency,
-
-          # NOTE: No VAT should be applied on as it can be considered as an advance
-          vat_rate: 0,
-          timezone: customer.applicable_timezone,
-        )
-
         create_credit_fee(invoice)
-
         compute_amounts(invoice)
+        Invoices::ApplyInvoiceCustomSectionsService.call(invoice:)
 
-        invoice.total_amount_cents = invoice.amount_cents + invoice.vat_amount_cents
-        invoice.save!
-
-        track_invoice_created(invoice)
-        result.invoice = invoice
+        if License.premium? && wallet_transaction.invoice_requires_successful_payment?
+          invoice.open!
+        else
+          invoice.finalized!
+        end
       end
 
-      SendWebhookJob.perform_later('invoice.paid_credit_added', result.invoice) if should_deliver_webhook?
+      if invoice.finalized?
+        Utils::SegmentTrack.invoice_created(result.invoice)
+        SendWebhookJob.perform_later("invoice.paid_credit_added", result.invoice)
+        GeneratePdfAndNotifyJob.perform_later(invoice:, email: should_deliver_email?)
+        Integrations::Aggregator::Invoices::CreateJob.perform_later(invoice:) if invoice.should_sync_invoice?
+        Integrations::Aggregator::Invoices::Hubspot::CreateJob.perform_later(invoice:) if invoice.should_sync_hubspot_invoice?
+      end
+
       create_payment(result.invoice)
 
       result
     rescue ActiveRecord::RecordInvalid => e
       result.record_validation_failure!(record: e.record)
+    rescue Sequenced::SequenceError
+      raise
+    rescue => e
+      result.fail_with_error!(e)
     end
 
     private
 
-    attr_accessor :customer, :timestamp, :wallet_transaction
+    attr_accessor :customer, :timestamp, :wallet_transaction, :invoice
 
     def currency
       @currency ||= wallet_transaction.wallet.currency
     end
 
-    def compute_amounts(invoice)
-      fee_amounts = invoice.fees.select(:amount_cents, :vat_amount_cents)
+    def create_generating_invoice
+      invoice_result = Invoices::CreateGeneratingService.call(
+        customer:,
+        invoice_type: :credit,
+        currency:,
+        datetime: Time.zone.at(timestamp)
+      )
+      invoice_result.raise_if_error!
 
-      invoice.amount_cents = fee_amounts.sum(:amount_cents)
-      invoice.amount_currency = currency
-      invoice.vat_amount_cents = fee_amounts.sum(:vat_amount_cents)
-      invoice.vat_amount_currency = currency
+      @invoice = invoice_result.invoice
+    end
+
+    def compute_amounts(invoice)
+      fee_amounts = invoice.fees.select(:amount_cents, :taxes_amount_cents)
+
+      invoice.currency = currency
+      invoice.fees_amount_cents = fee_amounts.sum(:amount_cents)
+      invoice.sub_total_excluding_taxes_amount_cents = invoice.fees_amount_cents
+      invoice.taxes_amount_cents = fee_amounts.sum(:taxes_amount_cents)
+      invoice.sub_total_including_taxes_amount_cents = (
+        invoice.sub_total_excluding_taxes_amount_cents + invoice.taxes_amount_cents
+      )
+      invoice.total_amount_cents = invoice.sub_total_including_taxes_amount_cents
     end
 
     def create_credit_fee(invoice)
@@ -71,28 +90,13 @@ module Invoices
       fee_result.raise_if_error!
     end
 
-    def should_deliver_webhook?
-      customer.organization.webhook_url?
-    end
-
     def create_payment(invoice)
-      Invoices::Payments::CreateService.new(invoice).call
+      Invoices::Payments::CreateService.call_async(invoice:)
     end
 
-    def track_invoice_created(invoice)
-      SegmentTrackJob.perform_later(
-        membership_id: CurrentContext.membership,
-        event: 'invoice_created',
-        properties: {
-          organization_id: invoice.organization.id,
-          invoice_id: invoice.id,
-          invoice_type: invoice.invoice_type,
-        },
-      )
-    end
-
-    def issuing_date
-      Time.zone.at(timestamp).in_time_zone(customer.applicable_timezone).to_date
+    def should_deliver_email?
+      License.premium? &&
+        customer.organization.email_settings.include?("invoice.finalized")
     end
   end
 end
