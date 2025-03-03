@@ -2,6 +2,14 @@
 
 module Validators
   class DecimalAmountService
+    def self.valid_amount?(amount)
+      new(amount).valid_amount?
+    end
+
+    def self.valid_positive_amount?(amount)
+      new(amount).valid_positive_amount?
+    end
+
     def initialize(amount)
       @amount = amount
     end
@@ -17,10 +25,6 @@ module Validators
 
       BigDecimal(amount).positive?
     end
-
-    private
-
-    attr_reader :amount, :decimal_amount
 
     def valid_decimal?
       # NOTE: as we want to be the more precise with decimals, we only
@@ -38,5 +42,9 @@ module Validators
     rescue ArgumentError, TypeError
       false
     end
+
+    private
+
+    attr_reader :amount, :decimal_amount
   end
 end

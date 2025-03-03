@@ -1,8 +1,9 @@
 # frozen_string_literal: true
 
-require 'rails_helper'
+require "rails_helper"
 
 RSpec.describe Resolvers::CouponsResolver, type: :graphql do
+  let(:required_permission) { "coupons:view" }
   let(:query) do
     <<~GQL
       query {
@@ -16,55 +17,34 @@ RSpec.describe Resolvers::CouponsResolver, type: :graphql do
 
   let(:membership) { create(:membership) }
   let(:organization) { membership.organization }
-  let(:coupon) { create(:coupon, organization: organization) }
+  let(:coupon) { create(:coupon, organization:) }
 
   before do
     coupon
 
-    create(:coupon, organization: organization, status: :terminated)
+    create(:coupon, organization:, status: :terminated)
   end
 
-  it 'returns a list of coupons' do
+  it_behaves_like "requires current user"
+  it_behaves_like "requires current organization"
+  it_behaves_like "requires permission", "coupons:view"
+
+  it "returns a list of coupons" do
     result = execute_graphql(
       current_user: membership.user,
       current_organization: organization,
-      query: query,
+      permissions: required_permission,
+      query:
     )
 
-    coupons_response = result['data']['coupons']
+    coupons_response = result["data"]["coupons"]
 
     aggregate_failures do
-      expect(coupons_response['collection'].count).to eq(organization.coupons.active.count)
-      expect(coupons_response['collection'].first['id']).to eq(coupon.id)
+      expect(coupons_response["collection"].count).to eq(organization.coupons.active.count)
+      expect(coupons_response["collection"].first["id"]).to eq(coupon.id)
 
-      expect(coupons_response['metadata']['currentPage']).to eq(1)
-      expect(coupons_response['metadata']['totalCount']).to eq(1)
-    end
-  end
-
-  context 'without current organization' do
-    it 'returns an error' do
-      result = execute_graphql(current_user: membership.user, query: query)
-
-      expect_graphql_error(
-        result: result,
-        message: 'Missing organization id',
-      )
-    end
-  end
-
-  context 'when not member of the organization' do
-    it 'returns an error' do
-      result = execute_graphql(
-        current_user: membership.user,
-        current_organization: create(:organization),
-        query: query,
-      )
-
-      expect_graphql_error(
-        result: result,
-        message: 'Not in organization',
-      )
+      expect(coupons_response["metadata"]["currentPage"]).to eq(1)
+      expect(coupons_response["metadata"]["totalCount"]).to eq(1)
     end
   end
 end

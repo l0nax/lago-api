@@ -7,27 +7,28 @@ module Credits
       super
     end
 
-    def create
+    def call
       return result if applied_coupons.blank?
+      return result if invoice.fees_amount_cents.zero?
 
-      applied_coupons.each do |applied_coupon|
-        break unless invoice.amount_cents&.positive?
-        next if applied_coupon.coupon.fixed_amount? && applied_coupon.amount_currency != currency
+      result.credits = []
 
-        base_amount_cents = if applied_coupon.coupon.limited_plans?
-          coupon_related_fees = coupon_fees(applied_coupon)
-          next unless coupon_related_fees.exists?
+      ## take an advisory lock on coupons for this customer
+      # We're not locking individual coupons as that might lead to deadlocks.
+      # This will also keep the lock for the shortest time possible, otherwise
+      # we'd have to wait for the transaction to either rollback / commit.
+      AppliedCoupons::LockService.new(customer:).call do
+        # reload coupons now that we've acquired the lock
+        applied_coupons.reload
 
-          coupon_base_amount_cents(coupon_related_fees:)
-        else
-          invoice.total_amount_cents
+        applied_coupons.each do |applied_coupon|
+          break unless invoice.sub_total_excluding_taxes_amount_cents&.positive?
+
+          credit_result = Credits::AppliedCouponService.call(invoice:, applied_coupon:)
+          credit_result.raise_if_error!
+
+          result.credits << credit_result.credit
         end
-
-        credit_result = Credits::AppliedCouponService.new(invoice:, applied_coupon:, base_amount_cents:).create
-        credit_result.raise_if_error!
-
-        invoice.credit_amount_cents += credit_result.credit.amount_cents
-        invoice.total_amount_cents -= credit_result.credit.amount_cents
       end
 
       result.invoice = invoice
@@ -43,27 +44,12 @@ module Credits
     def applied_coupons
       return @applied_coupons if @applied_coupons
 
-      with_plan_limit = customer.applied_coupons.active.joins(:coupon).where(coupon: { limited_plans: true })
-        .order(created_at: :asc)
-      applied_to_all = customer.applied_coupons.active.joins(:coupon).where(coupon: { limited_plans: false })
-        .order(created_at: :asc)
-
-      @applied_coupons = with_plan_limit + applied_to_all
-    end
-
-    def coupon_fees(applied_coupon)
-      invoice.fees.joins(subscription: :plan).where(plan: { id: applied_coupon.coupon.coupon_plans.select(:plan_id) })
-    end
-
-    def coupon_base_amount_cents(coupon_related_fees:)
-      fee_amounts = coupon_related_fees.select(:amount_cents, :vat_amount_cents)
-      fees_amount_cents = fee_amounts.sum(&:amount_cents)
-      fees_vat_amount_cents = fee_amounts.sum(&:vat_amount_cents)
-      total_fees_amount_cents = fees_amount_cents + fees_vat_amount_cents
-
-      # In some cases when credit note is already applied sum from above
-      # can be greater than invoice total_amount_cents
-      (total_fees_amount_cents > invoice.total_amount_cents) ? invoice.total_amount_cents : total_fees_amount_cents
+      # NOTE: We want to apply first coupons limited to the billable metrics, then the ones limited to the plans
+      #       and finally the ones with no limitation
+      @applied_coupons = customer
+        .applied_coupons.active
+        .joins(:coupon)
+        .order("coupons.limited_billable_metrics DESC, coupons.limited_plans DESC, applied_coupons.created_at ASC")
     end
   end
 end

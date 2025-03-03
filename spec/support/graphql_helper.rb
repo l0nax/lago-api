@@ -7,18 +7,32 @@ module GraphQLHelper
     end
   end
 
-  def execute_graphql(current_user: nil, query: nil, current_organization: nil, **kwargs)
+  def execute_graphql(current_user: nil, query: nil, current_organization: nil, customer_portal_user: nil, request: nil, permissions: nil, **kwargs) # rubocop:disable Metrics/ParameterLists
+    unless permissions.is_a?(Hash)
+      # we allow passing a single permission string or an array for convenience
+      permissions = Array.wrap(permissions).index_with { true }
+    end
+
+    permissions.keys.each do |permission|
+      next if Permission::DEFAULT_PERMISSIONS_HASH.key?(permission)
+
+      raise "Unknown permission: #{permission}"
+    end
+
     args = kwargs.merge(
       context: {
-        controller: controller,
-        current_user: current_user,
-        current_organization: current_organization,
-      },
+        controller:,
+        current_user:,
+        current_organization:,
+        customer_portal_user:,
+        request:,
+        permissions:
+      }
     )
 
     LagoApiSchema.execute(
       query,
-      **args,
+      **args
     )
   end
 
@@ -36,29 +50,29 @@ module GraphQLHelper
 
   def expect_unauthorized_error(result)
     expect_graphql_error(
-      result: result,
-      message: :unauthorized,
+      result:,
+      message: :unauthorized
     )
   end
 
   def expect_forbidden_error(result)
     expect_graphql_error(
-      result: result,
-      message: :forbidden,
+      result:,
+      message: :forbidden
     )
   end
 
   def expect_unprocessable_entity(result)
     expect_graphql_error(
-      result: result,
-      message: :unprocessable_entity,
+      result:,
+      message: :unprocessable_entity
     )
   end
 
   def expect_not_found(result)
     expect_graphql_error(
-      result: result,
-      message: :not_found,
+      result:,
+      message: :not_found
     )
   end
 end

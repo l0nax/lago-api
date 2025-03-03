@@ -3,7 +3,7 @@
 module V1
   module CreditNotes
     class PaymentProviderRefundErrorSerializer < ModelSerializer
-      alias credit_note model
+      alias_method :credit_note, :model
 
       def serialize
         {
@@ -12,7 +12,8 @@ module V1
           external_customer_id: credit_note.customer.external_id,
           provider_customer_id: options[:provider_customer_id],
           payment_provider: credit_note.customer.payment_provider,
-          provider_error: options[:provider_error],
+          payment_provider_code: credit_note.customer.payment_provider_code,
+          provider_error: options[:provider_error]
         }
       end
     end

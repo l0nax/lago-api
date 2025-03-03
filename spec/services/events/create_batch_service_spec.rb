@@ -1,156 +1,315 @@
 # frozen_string_literal: true
 
-require 'rails_helper'
+require "rails_helper"
 
 RSpec.describe Events::CreateBatchService, type: :service do
-  subject(:create_batch_service) { described_class.new }
-
-  let(:organization) { create(:organization) }
-  let(:billable_metric) { create(:billable_metric, organization: organization) }
-  let(:customer) { create(:customer, organization: organization) }
-
-  describe '#validate_params' do
-    let(:event_arguments) do
-      {
-        transaction_id: SecureRandom.uuid,
-        external_subscription_ids: %w[id1 id2],
-        code: 'foo',
-      }
-    end
-
-    it 'validates the presence of the mandatory arguments' do
-      result = create_batch_service.validate_params(params: event_arguments)
-
-      expect(result).to be_success
-    end
-
-    context 'with missing or nil arguments' do
-      let(:event_arguments) do
-        {
-          code: nil,
-        }
-      end
-
-      it 'returns an error' do
-        result = create_batch_service.validate_params(params: event_arguments)
-
-        aggregate_failures do
-          expect(result).not_to be_success
-          expect(result.error).to be_a(BaseService::ValidationFailure)
-          expect(result.error.messages.keys).to eq([:transaction_id, :code, :external_subscription_ids])
-          expect(result.error.messages[:transaction_id]).to eq(['value_is_mandatory'])
-          expect(result.error.messages[:code]).to eq(['value_is_mandatory'])
-          expect(result.error.messages[:external_subscription_ids]).to eq(['value_is_mandatory'])
-        end
-      end
-    end
+  subject(:create_batch_service) do
+    described_class.new(
+      organization:,
+      events_params:,
+      timestamp: creation_timestamp,
+      metadata:
+    )
   end
 
-  describe '#call' do
-    let(:transaction_id) { SecureRandom.uuid }
-    let(:subscription) { create(:active_subscription, customer: customer, organization: organization) }
-    let(:subscription2) { create(:active_subscription, customer: customer, organization: organization) }
+  let(:organization) { create(:organization) }
+  let(:timestamp) { Time.current.to_f }
+  let(:code) { "sum_agg" }
+  let(:metadata) { {} }
+  let(:creation_timestamp) { Time.current.to_f }
+  let(:precise_total_amount_cents) { "123.34" }
 
-    let(:create_args) do
-      {
-        external_subscription_ids: [subscription.external_id, subscription2.external_id],
-        code: billable_metric.code,
-        transaction_id: transaction_id,
-        properties: { foo: 'bar' },
-        timestamp: Time.zone.now.to_i,
+  let(:events_params) do
+    events = []
+    100.times do
+      event = {
+        external_customer_id: SecureRandom.uuid,
+        external_subscription_id: SecureRandom.uuid,
+        code:,
+        transaction_id: SecureRandom.uuid,
+        precise_total_amount_cents:,
+        properties: {foo: "bar"},
+        timestamp:
       }
-    end
-    let(:timestamp) { Time.zone.now.to_i }
 
-    before do
-      subscription
-      subscription2
+      events << event
     end
 
-    context 'when customer has two active subscription' do
-      it 'creates a new event for each subscription' do
-        result = create_batch_service.call(
-          organization: organization,
-          params: create_args,
-          timestamp: timestamp,
-          metadata: {},
-        )
+    {events:}
+  end
+
+  describe ".call" do
+    it "creates all events" do
+      result = nil
+
+      aggregate_failures do
+        expect { result = create_batch_service.call }.to change(Event, :count).by(100)
 
         expect(result).to be_success
+      end
+    end
 
-        events = result.events
+    it "enqueues a post processing job" do
+      expect { create_batch_service.call }.to have_enqueued_job(Events::PostProcessJob).exactly(100)
+    end
 
-        aggregate_failures do
-          expect(events.first.customer_id).to eq(customer.id)
-          expect(events.first.organization_id).to eq(organization.id)
-          expect(events.first.code).to eq(billable_metric.code)
-          expect(events.first.subscription_id).to eq(subscription.id)
-          expect(events.first.transaction_id).to eq(transaction_id)
-          expect(events.last.customer_id).to eq(customer.id)
-          expect(events.last.organization_id).to eq(organization.id)
-          expect(events.last.code).to eq(billable_metric.code)
-          expect(events.last.subscription_id).to eq(subscription2.id)
-          expect(events.last.transaction_id).to eq(transaction_id)
-        end
+    context "when no events are provided" do
+      before do
+        events_params[:events] = []
       end
 
-      context 'when event matches a recurring billable metric' do
-        let(:billable_metric) do
+      it "returns a no_events error" do
+        result = nil
+
+        aggregate_failures do
+          expect { result = create_batch_service.call }.not_to change(Event, :count)
+
+          expect(result).not_to be_success
+          expect(result.error).to be_a(BaseService::ValidationFailure)
+          expect(result.error.messages.keys).to include(:events)
+          expect(result.error.messages[:events]).to include("no_events")
+        end
+      end
+    end
+
+    context "when events count is too big" do
+      before do
+        events_params[:events].push(
+          {
+            external_customer_id: SecureRandom.uuid,
+            external_subscription_id: SecureRandom.uuid,
+            code:,
+            transaction_id: SecureRandom.uuid,
+            properties: {foo: "bar"},
+            timestamp:
+          }
+        )
+      end
+
+      it "returns a too big error" do
+        result = nil
+
+        aggregate_failures do
+          expect { result = create_batch_service.call }.not_to change(Event, :count)
+
+          expect(result).not_to be_success
+          expect(result.error).to be_a(BaseService::ValidationFailure)
+          expect(result.error.messages.keys).to include(:events)
+          expect(result.error.messages[:events]).to include("too_many_events")
+        end
+      end
+    end
+
+    context "with at least one invalid event" do
+      context "with already existing event" do
+        let(:existing_event) do
           create(
-            :billable_metric,
-            organization: customer.organization,
-            aggregation_type: 'recurring_count_agg',
-            field_name: 'item_id',
+            :event,
+            organization:,
+            transaction_id: "123456",
+            external_subscription_id: "123456"
           )
         end
 
-        let(:create_args) do
+        let(:events_params) do
           {
-            external_subscription_ids: [subscription.external_id, subscription2.external_id],
-            code: billable_metric.code,
-            transaction_id: SecureRandom.uuid,
-            properties: {
-              billable_metric.field_name => 'ext_12345',
-              'operation_type' => 'add',
-            },
-            timestamp: Time.zone.now.to_i,
+            events: [
+              {
+                external_customer_id: SecureRandom.uuid,
+                external_subscription_id: "123456",
+                code:,
+                transaction_id: "123456",
+                properties: {foo: "bar"},
+                timestamp:
+              }
+            ]
           }
         end
 
-        it 'creates a persisted metric' do
-          expect do
-            create_batch_service.call(
-              organization: organization,
-              params: create_args,
-              timestamp: timestamp,
-              metadata: {},
-            )
-          end.to change(PersistedEvent, :count).by(2)
+        before { existing_event }
+
+        it "returns an error" do
+          result = nil
+
+          aggregate_failures do
+            expect { result = create_batch_service.call }.not_to change(Event, :count)
+
+            expect(result).not_to be_success
+            expect(result.error).to be_a(BaseService::ValidationFailure)
+            expect(result.error.messages[0].keys).to include(:transaction_id)
+            expect(result.error.messages[0][:transaction_id]).to include("value_already_exist")
+          end
         end
       end
     end
 
-    context 'when event for one subscription already exists' do
-      let(:existing_event) do
-        create(
-          :event,
-          organization: organization,
-          transaction_id: create_args[:transaction_id],
-          subscription_id: subscription.id,
-        )
+    context "when timestamp is not present in the payload" do
+      let(:timestamp) { nil }
+
+      let(:events_params) do
+        {
+          events: [
+            {
+              external_customer_id: SecureRandom.uuid,
+              external_subscription_id: SecureRandom.uuid,
+              code:,
+              transaction_id: SecureRandom.uuid,
+              properties: {foo: "bar"},
+              timestamp:
+            }
+          ]
+        }
       end
 
-      before { existing_event }
+      it "creates an event by setting the timestamp to the current datetime" do
+        result = create_batch_service.call
 
-      it 'does not duplicate existing event' do
-        expect do
-          create_batch_service.call(
-            organization: organization,
-            params: create_args,
-            timestamp: timestamp,
-            metadata: {},
-          )
-        end.to change { organization.events.count }.by(1)
+        expect(result).to be_success
+        expect(result.events.first.timestamp).to eq(Time.zone.at(creation_timestamp))
+      end
+    end
+
+    context "when timestamp is given as string" do
+      let(:timestamp) { Time.current.to_f.to_s }
+
+      let(:events_params) do
+        {
+          events: [
+            {
+              external_customer_id: SecureRandom.uuid,
+              external_subscription_id: SecureRandom.uuid,
+              code:,
+              transaction_id: SecureRandom.uuid,
+              precise_total_amount_cents:,
+              properties: {foo: "bar"},
+              timestamp:
+            }
+          ]
+        }
+      end
+
+      it "creates an event by setting timestamp" do
+        result = create_batch_service.call
+
+        expect(result).to be_success
+        expect(result.events.first.timestamp).to eq(Time.zone.at(timestamp.to_f))
+      end
+    end
+
+    context "when timestamp is in a wrong format" do
+      let(:timestamp) { Time.current.to_s }
+      let(:events_params) do
+        {
+          events: [
+            {
+              external_customer_id: SecureRandom.uuid,
+              external_subscription_id: SecureRandom.uuid,
+              code:,
+              transaction_id: SecureRandom.uuid,
+              precise_total_amount_cents:,
+              properties: {foo: "bar"},
+              timestamp:
+            }
+          ]
+        }
+      end
+
+      it "returns an error" do
+        result = nil
+        expect { result = create_batch_service.call }.not_to change(Event, :count)
+
+        expect(result).not_to be_success
+        expect(result.error).to be_a(BaseService::ValidationFailure)
+        expect(result.error.messages.keys).to include(0)
+        expect(result.error.messages[0][:timestamp]).to include("invalid_format")
+      end
+    end
+
+    context "with an expression configured on the billable metric" do
+      let(:billable_metric) { create(:billable_metric, code:, organization:, field_name: "result", expression: "concat(event.properties.foo, '-bar')") }
+
+      before do
+        billable_metric
+      end
+
+      it "creates an event and updates the field name with the result of the expression" do
+        result = create_batch_service.call
+
+        expect(result).to be_success
+        result.events.each { |event| expect(event.properties["result"]).to eq("bar-bar") }
+      end
+
+      context "when not all the event properties are not provided" do
+        let(:events_params) do
+          {
+            events: [
+              {
+                external_subscription_id: SecureRandom.uuid,
+                code:,
+                transaction_id: SecureRandom.uuid,
+                properties: {},
+                timestamp:
+              }
+            ]
+          }
+        end
+
+        it "returns a failure when the expression fails to evaluate" do
+          result = create_batch_service.call
+
+          expect(result).to be_failure
+          expect(result.error).to be_a(BaseService::ValidationFailure)
+        end
+      end
+    end
+
+    context "when timestamp is sent with decimal precision" do
+      let(:timestamp) { DateTime.parse("2023-09-04T15:45:12.344Z").to_f }
+
+      let(:events_params) do
+        {
+          events: [
+            {
+              external_customer_id: SecureRandom.uuid,
+              external_subscription_id: SecureRandom.uuid,
+              code:,
+              transaction_id: SecureRandom.uuid,
+              precise_total_amount_cents:,
+              properties: {foo: "bar"},
+              timestamp:
+            }
+          ]
+        }
+      end
+
+      it "creates an event by keeping the millisecond precision" do
+        result = create_batch_service.call
+
+        expect(result).to be_success
+        expect(result.events.first.timestamp.iso8601(3)).to eq("2023-09-04T15:45:12.344Z")
+      end
+    end
+
+    context "when kafka is configured" do
+      let(:karafka_producer) { instance_double(WaterDrop::Producer) }
+
+      before do
+        ENV["LAGO_KAFKA_BOOTSTRAP_SERVERS"] = "kafka"
+        ENV["LAGO_KAFKA_RAW_EVENTS_TOPIC"] = "raw_events"
+      end
+
+      after do
+        ENV["LAGO_KAFKA_BOOTSTRAP_SERVERS"] = nil
+        ENV["LAGO_KAFKA_RAW_EVENTS_TOPIC"] = nil
+      end
+
+      it "produces the event on kafka" do
+        allow(Karafka).to receive(:producer).and_return(karafka_producer)
+        allow(karafka_producer).to receive(:produce_async)
+
+        create_batch_service.call
+
+        expect(karafka_producer).to have_received(:produce_async).exactly(100)
       end
     end
   end

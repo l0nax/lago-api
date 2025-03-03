@@ -1,41 +1,31 @@
 # frozen_string_literal: true
 
 module Resolvers
-  class EventsResolver < GraphQL::Schema::Resolver
+  class EventsResolver < Resolvers::BaseResolver
     include AuthenticableApiUser
     include RequiredOrganization
 
-    description 'Query events of an organization'
+    MAX_LIMIT = 1000
 
-    argument :page, Integer, required: false
+    description "Query events of an organization"
+
     argument :limit, Integer, required: false
+    argument :page, Integer, required: false
 
     type Types::Events::Object.collection_type, null: true
 
     def resolve(page: nil, limit: nil)
-      validate_organization!
-
-      current_organization
-        .events
-        .order(timestamp: :desc)
-        .includes(:customer)
-        .joins('LEFT OUTER JOIN billable_metrics ON billable_metrics.code = events.code')
-        .where(
-          [
-            'billable_metrics.organization_id = ?',
-            'billable_metrics.organization_id IS NULL',
-          ].join(' OR '),
-          current_organization.id,
-        )
-        .select(
-          [
-            'events.*',
-            'billable_metrics.name as billable_metric_name',
-            'billable_metrics.field_name as billable_metric_field_name',
-          ].join(','),
-        )
-        .page(page)
-        .per(limit)
+      if current_organization.clickhouse_events_store?
+        Clickhouse::EventsRaw.where(organization_id: current_organization.id)
+          .order(ingested_at: :desc)
+          .page(page)
+          .per((limit >= MAX_LIMIT) ? MAX_LIMIT : limit)
+      else
+        Event.where(organization_id: current_organization.id)
+          .order(created_at: :desc)
+          .page(page)
+          .per((limit >= MAX_LIMIT) ? MAX_LIMIT : limit)
+      end
     end
   end
 end

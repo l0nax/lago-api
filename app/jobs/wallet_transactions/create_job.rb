@@ -2,15 +2,11 @@
 
 module WalletTransactions
   class CreateJob < ApplicationJob
-    queue_as 'wallets'
+    queue_as "high_priority"
 
-    def perform(organization_id:, wallet_id:, paid_credits:, granted_credits:)
-      WalletTransactions::CreateService.new.create(
-        organization_id: organization_id,
-        wallet_id: wallet_id,
-        paid_credits: paid_credits,
-        granted_credits: granted_credits,
-      )
+    def perform(organization_id:, params:)
+      organization = Organization.find(organization_id)
+      WalletTransactions::CreateService.call!(organization:, params:)
     end
   end
 end

@@ -1,8 +1,9 @@
 # frozen_string_literal: true
 
-require 'rails_helper'
+require "rails_helper"
 
 RSpec.describe Resolvers::CreditNoteResolver, type: :graphql do
+  let(:required_permission) { "credit_notes:view" }
   let(:query) do
     <<-GQL
       query($creditNoteId: ID!) {
@@ -11,18 +12,14 @@ RSpec.describe Resolvers::CreditNoteResolver, type: :graphql do
           number
           creditStatus
           reason
+          currency
           totalAmountCents
-          totalAmountCurrency
           creditAmountCents
-          creditAmountCurrency
           balanceAmountCents
-          balanceAmountCurrency
           totalAmountCents
-          totalAmountCurrency
-          vatAmountCents
-          vatAmountCurrency
-          subTotalVatExcludedAmountCents
-          subTotalVatExcludedAmountCurrency
+          taxesAmountCents
+          subTotalExcludingTaxesAmountCents
+          couponsAdjustmentAmountCents
           createdAt
           updatedAt
           voidedAt
@@ -36,6 +33,14 @@ RSpec.describe Resolvers::CreditNoteResolver, type: :graphql do
             createdAt
             fee { id amountCents itemType itemCode itemName }
           }
+          appliedTaxes {
+            taxCode
+            taxName
+            taxRate
+            taxDescription
+            amountCents
+            amountCurrency
+          }
         }
       }
     GQL
@@ -47,20 +52,25 @@ RSpec.describe Resolvers::CreditNoteResolver, type: :graphql do
   let(:invoice) { create(:invoice, organization: membership.organization, customer:) }
   let(:credit_note) { create(:credit_note, customer:, invoice:) }
 
-  it 'returns a single credit note' do
+  it_behaves_like "requires current user"
+  it_behaves_like "requires current organization"
+  it_behaves_like "requires permission", "credit_notes:view"
+
+  it "returns a single credit note" do
     result = execute_graphql(
       current_user: membership.user,
       current_organization: customer.organization,
+      permissions: required_permission,
       query:,
       variables: {
-        creditNoteId: credit_note.id,
-      },
+        creditNoteId: credit_note.id
+      }
     )
 
-    credit_note_response = result['data']['creditNote']
+    credit_note_response = result["data"]["creditNote"]
 
     aggregate_failures do
-      expect(credit_note_response['id']).to eq(credit_note.id)
+      expect(credit_note_response["id"]).to eq(credit_note.id)
     end
   end
 end

@@ -6,23 +6,17 @@ module Mutations
       include AuthenticableApiUser
       include RequiredOrganization
 
-      graphql_name 'CreateAddOn'
-      description 'Creates a new add-on'
+      REQUIRED_PERMISSION = "addons:create"
 
-      argument :name, String, required: true
-      argument :code, String, required: true
-      argument :description, String, required: false
-      argument :amount_cents, GraphQL::Types::BigInt, required: true
-      argument :amount_currency, Types::CurrencyEnum, required: true
+      graphql_name "CreateAddOn"
+      description "Creates a new add-on"
+
+      input_object_class Types::AddOns::CreateInput
 
       type Types::AddOns::Object
 
       def resolve(**args)
-        validate_organization!
-
-        result = ::AddOns::CreateService
-          .new(context[:current_user])
-          .create(**args.merge(organization_id: current_organization.id))
+        result = ::AddOns::CreateService.call(args.merge(organization_id: current_organization.id))
 
         result.success? ? result.add_on : result_error(result)
       end

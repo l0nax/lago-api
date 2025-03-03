@@ -1,32 +1,32 @@
 # frozen_string_literal: true
 
 module Resolvers
-  class CouponsResolver < GraphQL::Schema::Resolver
+  class CouponsResolver < Resolvers::BaseResolver
     include AuthenticableApiUser
     include RequiredOrganization
 
-    description 'Query coupons of an organization'
+    REQUIRED_PERMISSION = "coupons:view"
 
-    argument :ids, [ID], required: false, description: 'List of coupon IDs to fetch'
-    argument :page, Integer, required: false
+    description "Query coupons of an organization"
+
     argument :limit, Integer, required: false
-    argument :status, Types::Coupons::StatusEnum, required: false
+    argument :page, Integer, required: false
     argument :search_term, String, required: false
+    argument :status, Types::Coupons::StatusEnum, required: false
 
     type Types::Coupons::Object.collection_type, null: false
 
-    def resolve(ids: nil, page: nil, limit: nil, status: nil, search_term: nil)
-      validate_organization!
-
-      query = CouponsQuery.new(organization: current_organization)
-      result = query.call(
+    def resolve(page: nil, limit: nil, status: nil, search_term: nil)
+      result = CouponsQuery.call(
+        organization: current_organization,
         search_term:,
-        page:,
-        limit:,
-        status:,
         filters: {
-          ids:,
+          status:
         },
+        pagination: {
+          page:,
+          limit:
+        }
       )
 
       result.coupons

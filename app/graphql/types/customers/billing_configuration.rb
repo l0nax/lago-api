@@ -3,10 +3,10 @@
 module Types
   module Customers
     class BillingConfiguration < Types::BaseObject
-      graphql_name 'CustomerBillingConfiguration'
+      graphql_name "CustomerBillingConfiguration"
 
-      field :id, ID, null: false
       field :document_locale, String
+      field :id, ID, null: false
     end
   end
 end

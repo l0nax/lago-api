@@ -3,55 +3,60 @@
 module Types
   module Plans
     class Object < Types::BaseObject
-      graphql_name 'Plan'
+      graphql_name "Plan"
 
       field :id, ID, null: false
-      field :organization, Types::OrganizationType
+      field :organization, Types::Organizations::OrganizationType
 
-      field :name, String, null: false
-      field :code, String, null: false
-      field :interval, Types::Plans::IntervalEnum, null: false
-      field :pay_in_advance, Boolean, null: false
       field :amount_cents, GraphQL::Types::BigInt, null: false
       field :amount_currency, Types::CurrencyEnum, null: false
-      field :trial_period, Float
-      field :description, String
       field :bill_charges_monthly, Boolean
-      field :parent_id, ID, null: true
+      field :code, String, null: false
+      field :description, String
+      field :interval, Types::Plans::IntervalEnum, null: false
+      field :invoice_display_name, String
+      field :minimum_commitment, Types::Commitments::Object, null: true
+      field :name, String, null: false
+      field :parent, Types::Plans::Object, null: true
+      field :pay_in_advance, Boolean, null: false
+      field :trial_period, Float
+      field :usage_thresholds, [Types::UsageThresholds::Object]
 
       field :charges, [Types::Charges::Object]
+      field :taxes, [Types::Taxes::Object]
+
+      field :has_overridden_plans, Boolean
 
       field :created_at, GraphQL::Types::ISO8601DateTime, null: false
       field :updated_at, GraphQL::Types::ISO8601DateTime, null: false
 
-      field :charge_count, Integer, null: false, description: 'Number of charges attached to a plan'
-      field :customer_count, Integer, null: false, description: 'Number of customers attached to a plan'
-      field :subscriptions_count, Integer, null: false
       field :active_subscriptions_count, Integer, null: false
+      field :charges_count, Integer, null: false, description: "Number of charges attached to a plan"
+      field :customers_count, Integer, null: false, description: "Number of customers attached to a plan"
       field :draft_invoices_count, Integer, null: false
+      field :subscriptions_count, Integer, null: false
 
-      def charge_count
+      def usage_thresholds
+        object.usage_thresholds.order(amount_cents: :asc)
+      end
+
+      def charges
+        object.charges.includes(filters: {values: :billable_metric_filter}).order(created_at: :asc)
+      end
+
+      def charges_count
         object.charges.count
       end
 
-      def customer_count
-        object.subscriptions.active.select(:customer_id).distinct.count
+      def has_overridden_plans
+        object.children.any?
       end
 
       def subscriptions_count
-        object.subscriptions.count
-      end
+        count = object.subscriptions.count
+        return count unless object.children
 
-      def active_subscriptions_count
-        object.subscriptions.active.count
-      end
-
-      def draft_invoices_count
-        object.subscriptions.joins(:invoices)
-          .merge(Invoice.draft)
-          .select(:invoice_id)
-          .distinct
-          .count
+        count + object.children.joins(:subscriptions).select("subscriptions.id").distinct.count
       end
     end
   end

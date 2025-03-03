@@ -1,45 +1,99 @@
 # frozen_string_literal: true
 
-require 'rails_helper'
+require "rails_helper"
 
 RSpec.describe BillSubscriptionJob, type: :job do
-  let(:subscription) { create(:subscription) }
+  let(:subscriptions) { [create(:subscription)] }
   let(:timestamp) { Time.zone.now.to_i }
 
-  let(:invoice_service) { instance_double(Invoices::SubscriptionService) }
+  let(:invoice) { nil }
+  let(:invoicing_reason) { :subscription_starting }
   let(:result) { BaseService::Result.new }
 
-  it 'calls the invoices create service' do
-    allow(Invoices::SubscriptionService).to receive(:new)
-      .with(subscriptions: [subscription], timestamp: timestamp, recurring: false)
-      .and_return(invoice_service)
-    allow(invoice_service).to receive(:create)
+  before do
+    allow(Invoices::SubscriptionService).to receive(:call)
+      .with(subscriptions:, timestamp:, invoicing_reason:, invoice:, skip_charges: false)
       .and_return(result)
-
-    described_class.perform_now([subscription], timestamp)
-
-    expect(Invoices::SubscriptionService).to have_received(:new)
-    expect(invoice_service).to have_received(:create)
   end
 
-  context 'when result is a failure' do
+  it "calls the invoices create service" do
+    described_class.perform_now(subscriptions, timestamp, invoicing_reason:)
+
+    expect(Invoices::SubscriptionService).to have_received(:call)
+  end
+
+  context "when result is a failure" do
     let(:result) do
-      BaseService::Result.new.single_validation_failure!(error_code: 'error')
+      result = BaseService::Result.new
+      result.invoice = invoice
+      result.single_validation_failure!(error_code: "error")
     end
 
-    it 'raises an error' do
-      allow(Invoices::SubscriptionService).to receive(:new)
-        .with(subscriptions: [subscription], timestamp: timestamp, recurring: false)
-        .and_return(invoice_service)
-      allow(invoice_service).to receive(:create)
-        .and_return(result)
-
+    it "raises an error" do
       expect do
-        described_class.perform_now([subscription], timestamp)
+        described_class.perform_now(subscriptions, timestamp, invoicing_reason:)
       end.to raise_error(BaseService::FailedResult)
 
-      expect(Invoices::SubscriptionService).to have_received(:new)
-      expect(invoice_service).to have_received(:create)
+      expect(Invoices::SubscriptionService).to have_received(:call)
+    end
+
+    context "with a previously created invoice" do
+      let(:invoice) { create(:invoice, :generating) }
+
+      it "raises an error" do
+        expect do
+          described_class.perform_now(subscriptions, timestamp, invoicing_reason:, invoice:)
+        end.to raise_error(BaseService::FailedResult)
+
+        expect(Invoices::SubscriptionService).to have_received(:call)
+      end
+
+      it "creates an InvoiceError" do
+        expect do
+          described_class.perform_now(subscriptions, timestamp, invoicing_reason:, invoice:)
+        end.to raise_error(BaseService::FailedResult)
+
+        expect(InvoiceError.all.size).to eq(1)
+        expect(InvoiceError.first.id).to eq(invoice.id)
+      end
+    end
+
+    context "when a generating invoice is attached to the result" do
+      let(:result_invoice) { create(:invoice, :generating) }
+
+      before { result.invoice = result_invoice }
+
+      it "retries the job with the invoice" do
+        described_class.perform_now(subscriptions, timestamp, invoicing_reason:)
+
+        expect(Invoices::SubscriptionService).to have_received(:call)
+
+        expect(described_class).to have_been_enqueued
+          .with(subscriptions, timestamp, invoicing_reason:, invoice: result_invoice, skip_charges: false)
+      end
+    end
+
+    context "when a not generating invoice is attached to the result" do
+      let(:result_invoice) { create(:invoice, :draft) }
+
+      before { result.invoice = result_invoice }
+
+      it "raises an error" do
+        expect do
+          described_class.perform_now(subscriptions, timestamp, invoicing_reason:)
+        end.to raise_error(BaseService::FailedResult)
+
+        expect(Invoices::SubscriptionService).to have_received(:call)
+      end
+
+      it "creates an InvoiceError" do
+        expect do
+          described_class.perform_now(subscriptions, timestamp, invoicing_reason:)
+        end.to raise_error(BaseService::FailedResult)
+
+        expect(InvoiceError.all.size).to eq(1)
+        expect(InvoiceError.first.id).to eq(result_invoice.id)
+      end
     end
   end
 end

@@ -4,12 +4,8 @@ module Api
   module V1
     class CouponsController < Api::BaseController
       def create
-        service = Coupons::CreateService.new
-        result = service.create(
-          CouponLegacyInput.new(
-            current_organization,
-            input_params.merge(organization_id: current_organization.id),
-          ).create_input,
+        result = Coupons::CreateService.call(
+          input_params.merge(organization_id: current_organization.id).to_h
         )
 
         if result.success?
@@ -24,10 +20,7 @@ module Api
 
         result = Coupons::UpdateService.call(
           coupon:,
-          params: CouponLegacyInput.new(
-            current_organization,
-            input_params,
-          ).update_input,
+          params: input_params.to_h
         )
 
         if result.success?
@@ -50,28 +43,35 @@ module Api
 
       def show
         coupon = current_organization.coupons.find_by(
-          code: params[:code],
+          code: params[:code]
         )
 
-        return not_found_error(resource: 'coupon') unless coupon
+        return not_found_error(resource: "coupon") unless coupon
 
         render_coupon(coupon)
       end
 
       def index
-        coupons = current_organization.coupons
-          .order(created_at: :desc)
-          .page(params[:page])
-          .per(params[:per_page] || PER_PAGE)
-
-        render(
-          json: ::CollectionSerializer.new(
-            coupons,
-            ::V1::CouponSerializer,
-            collection_name: 'coupons',
-            meta: pagination_metadata(coupons),
-          ),
+        result = CouponsQuery.call(
+          organization: current_organization,
+          pagination: {
+            page: params[:page],
+            limit: params[:per_page] || PER_PAGE
+          }
         )
+
+        if result.success?
+          render(
+            json: ::CollectionSerializer.new(
+              result.coupons,
+              ::V1::CouponSerializer,
+              collection_name: "coupons",
+              meta: pagination_metadata(result.coupons)
+            )
+          )
+        else
+          render_error_response(result)
+        end
       end
 
       private
@@ -80,6 +80,7 @@ module Api
         params.require(:coupon).permit(
           :name,
           :code,
+          :description,
           :coupon_type,
           :amount_cents,
           :amount_currency,
@@ -88,12 +89,11 @@ module Api
           :frequency_duration,
           :expiration,
           :expiration_at,
-          # NOTE: Legacy field
-          :expiration_date,
           :reusable,
           applies_to: [
             plan_codes: [],
-          ],
+            billable_metric_codes: []
+          ]
         )
       end
 
@@ -101,9 +101,13 @@ module Api
         render(
           json: ::V1::CouponSerializer.new(
             coupon,
-            root_name: 'coupon',
-          ),
+            root_name: "coupon"
+          )
         )
+      end
+
+      def resource_name
+        "coupon"
       end
     end
   end

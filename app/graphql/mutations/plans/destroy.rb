@@ -5,8 +5,10 @@ module Mutations
     class Destroy < BaseMutation
       include AuthenticableApiUser
 
-      graphql_name 'DestroyPlan'
-      description 'Deletes a Plan'
+      REQUIRED_PERMISSION = "plans:delete"
+
+      graphql_name "DestroyPlan"
+      description "Deletes a Plan"
 
       argument :id, ID, required: true
 

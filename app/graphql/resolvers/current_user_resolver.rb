@@ -2,10 +2,10 @@
 
 module Resolvers
   # MeResolver resolves current user field
-  class CurrentUserResolver < GraphQL::Schema::Resolver
+  class CurrentUserResolver < Resolvers::BaseResolver
     include AuthenticableApiUser
 
-    description 'Retrieves currently connected user'
+    description "Retrieves currently connected user"
 
     type Types::UserType, null: false
 

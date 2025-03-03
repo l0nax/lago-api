@@ -2,7 +2,17 @@
 
 module Clock
   class ActivateSubscriptionsJob < ApplicationJob
-    queue_as 'clock'
+    include SentryCronConcern
+
+    queue_as do
+      if ActiveModel::Type::Boolean.new.cast(ENV["SIDEKIQ_CLOCK"])
+        :clock_worker
+      else
+        :clock
+      end
+    end
+
+    unique :until_executed, on_conflict: :log
 
     def perform
       Subscriptions::ActivateService.new(timestamp: Time.current.to_i).activate_all_pending

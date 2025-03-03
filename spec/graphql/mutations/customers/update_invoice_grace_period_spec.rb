@@ -1,8 +1,9 @@
 # frozen_string_literal: true
 
-require 'rails_helper'
+require "rails_helper"
 
 RSpec.describe Mutations::Customers::UpdateInvoiceGracePeriod, type: :graphql do
+  let(:required_permissions) { "customer_settings:update:grace_period" }
   let(:membership) { create(:membership) }
   let(:organization) { membership.organization }
   let(:customer) { create(:customer, organization:) }
@@ -22,39 +23,27 @@ RSpec.describe Mutations::Customers::UpdateInvoiceGracePeriod, type: :graphql do
 
   around { |test| lago_premium!(&test) }
 
-  it 'updates a customer' do
+  it_behaves_like "requires current user"
+  it_behaves_like "requires permission", %w[customers:update customer_settings:update:grace_period]
+
+  it "updates a customer" do
     result = execute_graphql(
       current_user: membership.user,
+      permissions: required_permissions,
       query: mutation,
       variables: {
         input: {
           id: customer.id,
-          invoiceGracePeriod: 12,
-        },
-      },
+          invoiceGracePeriod: 12
+        }
+      }
     )
 
-    result_data = result['data']['updateCustomerInvoiceGracePeriod']
+    result_data = result["data"]["updateCustomerInvoiceGracePeriod"]
 
     aggregate_failures do
-      expect(result_data['id']).to be_present
-      expect(result_data['invoiceGracePeriod']).to eq(12)
-    end
-  end
-
-  context 'without current user' do
-    it 'returns an error' do
-      result = execute_graphql(
-        query: mutation,
-        variables: {
-          input: {
-            id: customer.id,
-            invoiceGracePeriod: 12,
-          },
-        },
-      )
-
-      expect_unauthorized_error(result)
+      expect(result_data["id"]).to be_present
+      expect(result_data["invoiceGracePeriod"]).to eq(12)
     end
   end
 end

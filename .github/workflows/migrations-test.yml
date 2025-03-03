@@ -1,0 +1,65 @@
+name: Run rails migrations
+on:
+  push:
+    branches:
+      - "main"
+  pull_request:
+    types: [opened, synchronize, reopened]
+jobs:
+  run-migrations:
+    name: Run migrations
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:14-alpine
+        ports:
+          - "5432:5432"
+        env:
+          POSTGRES_DB: lago
+          POSTGRES_USER: lago
+          POSTGRES_PASSWORD: lago
+    env:
+      RAILS_ENV: test
+      DATABASE_URL: "postgres://lago:lago@localhost:5432/lago"
+      RAILS_MASTER_KEY: N+XcWoGDzKjuoxrU8BIPN5D0/GSuqx9s
+      SECRET_KEY_BASE: cvIAI6ycC0OnVDRAjT5hmbRxnjCxl4YB
+      ENCRYPTION_PRIMARY_KEY: 5I9mjfzry2P787x4S5ZuDdJwXNgYEwqo
+      ENCRYPTION_DETERMINISTIC_KEY: SGiZzmh18EjBF9gSW8LCNk7pelauWVr4
+      ENCRYPTION_KEY_DERIVATION_SALT: q3pkMw34ZkRPFSf2LmtWe705yw532Pf7
+      LAGO_API_URL: https://api.lago.dev
+      LAGO_PDF_URL: https://pdf.lago.dev
+      LAGO_FROM_EMAIL: noreply@getlago.com
+      LAGO_CLICKHOUSE_ENABLED: true
+      LAGO_CLICKHOUSE_MIGRATIONS_ENABLED: true
+      LAGO_CLICKHOUSE_HOST: localhost
+      LAGO_CLICKHOUSE_DATABASE: default
+      LAGO_CLICKHOUSE_USERNAME: ""
+      LAGO_CLICKHOUSE_PASSWORD: "password"
+      LAGO_DISABLE_SCHEMA_DUMP: true
+      ANNOTATE_SKIP_ON_DB_MIGRATE: 1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Install Ruby and gems
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3.6"
+          bundler-cache: true
+      - name: Start Clickhouse database
+        run: |
+          docker run -d --rm -p 8123:8123 -p 9000:9000 --ulimit nofile=262144:262144 -v ./clickhouse-s3:/var/lib/clickhouse-s3 -v ./ci/clickhouse/config.xml:/etc/clickhouse-server/config.d/config.xml -e CLICKHOUSE_PASSWORD=password clickhouse/clickhouse-server
+        shell: bash
+      - name: Generate RSA keys
+        run: ./scripts/generate.rsa.sh
+      - name: Move db schema for comparison
+        run: mv db/schema.rb db/schema-before-dump.rb
+      - name: Perform Postgres database migrations
+        run: bin/rails db:migrate:primary
+      - name: dump schema
+        run: LAGO_DISABLE_SCHEMA_DUMP="" bin/rails db:schema:dump:primary
+      - name: Ensure no changes to schema.rb
+        run: diff db/schema.rb db/schema-before-dump.rb
+      - name: Ensure annotations are up to date
+        run: bundle exec annotate --frozen
+      - name: Perform Clickhouse database migrations
+        run: bin/rails db:migrate:clickhouse

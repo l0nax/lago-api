@@ -1,0 +1,258 @@
+- if subscription?
+  - subscriptions.each do |subscription|
+    - invoice_subscription = invoice_subscription(subscription.id)
+    - subscription_fee = invoice_subscription.subscription_fee
+    - commitment_fee = invoice_subscription.commitment_fee
+    - if subscriptions.count > 1
+      h2.title-2.mb-24 class="#{'invoice-details-title' if subscriptions.count > 1}" = I18n.t('invoice.details', resource: subscription.invoice_name)
+
+    / Subscription fee section
+    .invoice-resume.overflow-auto class="#{'mb-24' if subscription_fees(subscription.id).charge.any? && different_boundaries_for_subscription_and_charges(subscription)}"
+      table.invoice-resume-table width="100%"
+        tr.first_child
+          td.body-2 = I18n.t('invoice.fees_from_to_date', from_date: I18n.l(invoice_subscription.from_datetime_in_customer_timezone&.to_date, format: :default), to_date: I18n.l(invoice_subscription.to_datetime_in_customer_timezone&.to_date, format: :default))
+          td.body-2 = I18n.t('invoice.units')
+          td.body-2 = I18n.t('invoice.unit_price')
+          td.body-2 = I18n.t('invoice.tax_rate')
+          td.body-2 = I18n.t('invoice.amount')
+
+        - if FeeDisplayHelper.should_display_subscription_fee?(invoice_subscription)
+          tr
+            - if subscription_fee&.invoice_display_name&.present?
+              td.body-1 = subscription_fee&.invoice_display_name
+            - else
+              td.body-1 = I18n.t('invoice.subscription_interval', plan_interval: I18n.t("invoice.#{subscription.plan.interval}"), plan_name: subscription.plan.invoice_name)
+            td.body-2 = 1
+            td.body-2 = MoneyHelper.format(invoice_subscription.subscription_amount)
+            td.body-2 == TaxHelper.applied_taxes(subscription_fee)
+            td.body-2 = MoneyHelper.format(invoice_subscription.subscription_amount)
+
+        - if subscription? && subscription_fees(subscription.id).charge.any?
+          / Charges payed in advance on payed in advance plan
+          - if subscription.plan.charges.where(pay_in_advance: true).any? && subscription.plan.pay_in_advance?
+            / Loop over all top level fees
+            - subscription_fees(subscription.id).charge.positive_units.where(true_up_parent_fee: nil).joins(charge: :billable_metric).sort_by { |f| f.invoice_sorting_clause }.group_by(&:charge_id).each do |_charge_id, fees|
+              - fee = fees.first
+              - next unless fee.charge.pay_in_advance?
+
+              / Fees for filters
+              - if fees.all? { |f| f.charge_filter_id? } && fees.sum(&:units) > 0
+                - fees.select { |f| f.units.positive? }.each do |fee|
+                  - if fee.amount_details.blank?
+                    == SlimHelper.render('templates/invoices/v4/_default_fee', fee)
+                  - else
+                    == SlimHelper.render('templates/invoices/v4/_fee_with_filters', fee)
+
+                / True up fees attached to the fee
+                - if fee.true_up_fee.present?
+                  == SlimHelper.render('templates/invoices/v4/_true_up_fee', fee)
+
+              / Fees without filters
+              - else
+                - fees.sort_by { |f| f.invoice_sorting_clause }.each do |fee|
+                  == SlimHelper.render('templates/invoices/v4/_fees_without_filters', fee)
+
+    / Charge fees section for subscription invoice
+    - if subscription? && subscription_fees(subscription.id).charge.any?
+      / Charges payed in arrears OR charges and plan payed in advance
+      - if subscription.plan.charges.where(pay_in_advance: false).any? && existing_fees_in_interval?(subscription_id: subscription.id)
+        .invoice-resume.overflow-auto
+          table.invoice-resume-table width="100%"
+            - if different_boundaries_for_subscription_and_charges(subscription)
+              tr.first_child
+                td.body-2 = I18n.t('invoice.fees_from_to_date', from_date: I18n.l(invoice_subscription.charges_from_datetime_in_customer_timezone&.to_date, format: :default), to_date: I18n.l(invoice_subscription.charges_to_datetime_in_customer_timezone&.to_date, format: :default))
+                td.body-2 = I18n.t('invoice.units')
+                td.body-2 = I18n.t('invoice.unit_price')
+                td.body-2 = I18n.t('invoice.tax_rate')
+                td.body-2 = I18n.t('invoice.amount')
+
+            / Loop over all top level fees
+            - subscription_fees(subscription.id).charge.positive_units.where(true_up_parent_fee: nil).joins(charge: :billable_metric).sort_by { |f| f.invoice_sorting_clause }.group_by(&:charge_id).each do |_charge_id, fees|
+              - fee = fees.first
+              - next if fee.charge.pay_in_advance?
+
+              / Fees for filters
+              - if fees.all? { |f| f.charge_filter_id? } && fees.sum(&:units) > 0
+                - fees.select { |f| f.units.positive? }.each do |fee|
+                  - if fee.amount_details.blank?
+                    == SlimHelper.render('templates/invoices/v4/_default_fee_with_filters', fee)
+                  - else
+                    == SlimHelper.render('templates/invoices/v4/_fee_with_filters', fee)
+
+                / True up fees attached to the fee
+                - fees.select { |f| f.true_up_fee.present? }.each do |fee|
+                  == SlimHelper.render('templates/invoices/v4/_true_up_fee', fee)
+
+              / Fees without filters
+              - else
+                - fees.sort_by { |f| f.invoice_sorting_clause }.each do |fee|
+                  == SlimHelper.render('templates/invoices/v4/_fees_without_filters', fee)
+
+      - if commitment_fee
+        table.invoice-resume-table width="100%"
+          tr
+            td.body-1 = commitment_fee.invoice_name
+            td.body-2 = 1
+            td.body-2 = MoneyHelper.format(commitment_fee.amount)
+            td.body-2 == TaxHelper.applied_taxes(commitment_fee)
+            td.body-2 = MoneyHelper.format(commitment_fee.amount)
+
+      / Charges payed in advance on paid in arrears plan
+      - if subscription.plan.charges.where(pay_in_advance: true).any? && !subscription.plan.pay_in_advance? && existing_fees_in_interval?(subscription_id: subscription.id, charge_in_advance: true)
+        .invoice-resume.overflow-auto class="mt-24"
+          table.invoice-resume-table width="100%"
+            tr.first_child
+              - pay_in_advance_interval = ::Subscriptions::DatesService.charge_pay_in_advance_interval(invoice_subscription.timestamp, subscription)
+              td.body-2 = I18n.t('invoice.fees_from_to_date', from_date: I18n.l(pay_in_advance_interval[:charges_from_date], format: :default), to_date: I18n.l(pay_in_advance_interval[:charges_to_date], format: :default))
+              td.body-2 = I18n.t('invoice.units')
+              td.body-2 = I18n.t('invoice.unit_price')
+              td.body-2 = I18n.t('invoice.tax_rate')
+              td.body-2 = I18n.t('invoice.amount')
+
+            / Loop over all top level fees
+            - subscription_fees(subscription.id).charge.positive_units.where(true_up_parent_fee: nil).joins(charge: :billable_metric).sort_by { |f| f.invoice_sorting_clause }.group_by(&:charge_id).each do |_charge_id, fees|
+              - fee = fees.first
+              - next unless fee.charge.pay_in_advance?
+
+              / Fees for filters
+              - if fees.all? { |f| f.charge_filter_id? } && fees.sum(&:units) > 0
+                - fees.select { |f| f.units.positive? }.each do |fee|
+                  - if fee.amount_details.blank?
+                    == SlimHelper.render('templates/invoices/v4/_default_fee', fee)
+                  - else
+                    == SlimHelper.render('templates/invoices/v4/_fee_with_filters', fee)
+
+                / True up fees attached to the fee
+                - if fee.true_up_fee.present?
+                  == SlimHelper.render('templates/invoices/v4/_true_up_fee', fee)
+
+              / Fees without filters
+              - else
+                - fees.sort_by { |f| f.invoice_sorting_clause }.each do |fee|
+                  == SlimHelper.render('templates/invoices/v4/_fees_without_filters', fee)
+
+    / Total section
+    .invoice-resume.overflow-auto
+      table.total-table width="100%"
+        - if subscriptions.count == 1
+          - unless credit?
+            - if progressive_billing_credit_amount_cents.positive?
+              tr
+                td.body-2
+                td.body-2 = I18n.t('invoice.progressive_billing_credit')
+                td.body-2 = '-' + MoneyHelper.format(progressive_billing_credit_amount)
+
+            - if coupons_amount_cents.positive?
+              - credits.coupon_kind.order(created_at: :asc).each do |credit|
+                tr
+                  td.body-2
+                  td.body-2 #{credit.invoice_coupon_display_name}
+                  td.body-2 = '-' +  MoneyHelper.format(credit.amount)
+          tr
+            td.body-2
+            td.body-2 = I18n.t('invoice.sub_total_without_tax')
+            td.body-2 = MoneyHelper.format(sub_total_excluding_taxes_amount)
+          - if applied_taxes.present?
+            - applied_taxes.order(tax_rate: :desc).each do |applied_tax|
+              tr
+                td.body-2
+                - if applied_tax.applied_on_whole_invoice?
+                  td.body-2 = I18n.t('invoice.tax_name_only.' + applied_tax.tax_code)
+                  td.body-2
+                - else
+                  td.body-2 = I18n.t('invoice.tax_name', name: applied_tax.tax_name, rate: applied_tax.tax_rate, amount: MoneyHelper.format(applied_tax.taxable_amount))
+                  td.body-2 = MoneyHelper.format(applied_tax.amount)
+          - else
+            tr
+              td.body-2
+              td.body-2 = I18n.t('invoice.tax_name_with_details', name: 'Tax', rate: 0)
+              td.body-2 = MoneyHelper.format(0.to_money(currency))
+          tr
+            td.body-2
+            td.body-2 = I18n.t('invoice.sub_total_with_tax')
+            td.body-2 = MoneyHelper.format(sub_total_including_taxes_amount)
+          - if credits.credit_note_kind.any?
+            tr
+              td.body-2
+              td.body-2 = I18n.t('invoice.credit_notes')
+              td.body-2 = '-' +  MoneyHelper.format(credit_notes_amount)
+          - if subscription? && wallet_transactions.exists?
+            tr
+              td.body-2
+              td.body-2 = I18n.t('invoice.prepaid_credits')
+              td.body-2 = '-' + MoneyHelper.format(prepaid_credit_amount)
+          tr
+            td.body-2
+            td.body-1 = I18n.t('invoice.total')
+            td.body-1
+              = MoneyHelper.format(total_amount)
+        - else
+          - if progressive_billing_credit_amount_cents.positive?
+            - credits = progressice_billing_credits(invoice_subscription.subscription).all
+            - if credits.present?
+              tr
+                td.body-2
+                td.body-2 = I18n.t('invoice.progressive_billing_credit')
+                td.body-2 = '-' + MoneyHelper.format(credits.sum(&:amount))
+          tr
+            td.body-2
+            td.body-1 = I18n.t('invoice.total')
+            td.body-1
+              = MoneyHelper.format(invoice_subscription.total_amount)
+
+    / Recuring fees breakdown
+    - if subscription? && subscription_fees(subscription.id).charge.any?
+      .invoice-resume.mb-24.overflow-auto
+        - recurring_fees(subscription.id).group_by(&:charge_id).each do |_charge_id, fees|
+          - next unless fees.sum(&:units) > 0
+
+          h2.invoice-details-title.title-2.mb-24 = I18n.t('invoice.details', resource: subscription.invoice_name)
+
+          - number_of_days_in_period = 0
+
+          / Fees for filters
+          - if fees.all? { |f| f.charge_filter_id? }
+            - fees.select { |f| f.units.positive? }.each do |fee|
+              .body-3 = fees.first.invoice_name
+              .body-1.mb-24 = I18n.t('invoice.breakdown_of', fee_filter_display_name: fee.filter_display_name(separator: ' • '))
+              .breakdown-details.mb-24
+                table.breakdown-details-table width="100%"
+                  - recurring_breakdown(fee).each do |breakdown|
+                    - number_of_days_in_period = breakdown.total_duration
+                    tr
+                      td width="20%"
+                        .body-1 = I18n.l(breakdown.date, format: :default)
+                        .body-3 = I18n.t('invoice.breakdown_for_days', breakdown_duration: breakdown.duration, breakdown_total_duration: breakdown.total_duration)
+                      td.body-1 width="80%"
+                        - if breakdown.action.to_sym == :add
+                          | +#{breakdown.amount} #{fee.item_name}
+                        - elsif breakdown.action.to_sym == :remove
+                          | #{breakdown.amount.negative? ? '' : '-'}#{breakdown.amount} #{fee.item_name}
+                        - else
+                          | +/-#{breakdown.amount} #{fee.item_name}
+
+          / Fees without group
+          - else
+            .body-3 = fees.first.invoice_name
+            .body-1.mb-24 = I18n.t('invoice.breakdown')
+            .breakdown-details.mb-24
+              table.breakdown-details-table width="100%"
+                - fees.each do |fee|
+                  - recurring_breakdown(fee).each do |breakdown|
+                    - number_of_days_in_period = breakdown.total_duration
+                    tr
+                      td width="20%"
+                        .body-1 = breakdown.date.strftime('%b %d, %Y')
+                        .body-3 = I18n.t('invoice.breakdown_for_days', breakdown_duration: breakdown.duration, breakdown_total_duration: breakdown.total_duration)
+                      td.body-1 width="80%"
+                        - if breakdown.action.to_sym == :add
+                          | +#{breakdown.amount} #{fee.item_name}
+                        - elsif breakdown.action.to_sym == :remove
+                          | #{breakdown.amount.negative? ? '' : '-'}#{breakdown.amount} #{fee.item_name}
+                        - else
+                          | +/-#{breakdown.amount} #{fee.item_name}
+
+          - if fees.first.charge.prorated?
+            .alert.body-3 = I18n.t('invoice.notice_prorated', days_in_month: number_of_days_in_period)
+          - else
+            .alert.body-3 = I18n.t('invoice.notice_full')

@@ -5,24 +5,18 @@ module Mutations
     class Update < BaseMutation
       include AuthenticableApiUser
 
-      graphql_name 'UpdateSubscription'
-      description 'Update a Subscription'
+      REQUIRED_PERMISSION = "subscriptions:update"
 
-      argument :id, ID, required: true
-      argument :name, String, required: false
-      argument :subscription_at, GraphQL::Types::ISO8601DateTime, required: false
+      graphql_name "UpdateSubscription"
+      description "Update a Subscription"
+
+      input_object_class Types::Subscriptions::UpdateSubscriptionInput
 
       type Types::Subscriptions::Object
 
       def resolve(**args)
         subscription = context[:current_user].subscriptions.find_by(id: args[:id])
-
-        result = ::Subscriptions::UpdateService
-          .new(context[:current_user])
-          .update(
-            subscription: subscription,
-            args: args,
-          )
+        result = ::Subscriptions::UpdateService.call(subscription:, params: args)
 
         result.success? ? result.subscription : result_error(result)
       end

@@ -35,11 +35,21 @@ module Subscriptions
         (next_month_date.to_date + 1.day - from_date.to_date).to_i
       end
 
-      alias compute_charges_duration compute_duration
+      alias_method :compute_charges_duration, :compute_duration
 
       private
 
       def compute_base_date
+        # NOTE: if subscription anniversary is on last day of month and current month days count
+        #       is less than month anniversary day count, we need to use the last day of the previous month
+        if subscription.anniversary? && last_day_of_month?(billing_date) && (billing_date.day < subscription_at.day)
+          if (billing_date - 1.month).end_of_month.day >= subscription_at.day
+            return (billing_date - 1.month).change(day: subscription_at.day)
+          end
+
+          return (billing_date - 1.month).end_of_month
+        end
+
         billing_date - 1.month
       end
 
@@ -55,7 +65,13 @@ module Subscriptions
           year += 1
         end
 
-        build_date(year, month, day)
+        date = build_date(year, month, day)
+
+        # NOTE: if subscription anniversary day is higher than the current last day of the month,
+        #       subscription period, will end on the previous end of day
+        return date - 1.day if last_day_of_month?(date) && subscription_at.day > date.day
+
+        date
       end
 
       def compute_next_end_of_period
@@ -87,11 +103,18 @@ module Subscriptions
       def previous_anniversary_day(date)
         year = nil
         month = nil
-        day = subscription_at.day
+
+        # NOTE: if subscription anniversary day is higher than the current last day of the month,
+        #       anniversary day is on the current day
+        day = if subscription.anniversary? && last_day_of_month?(date) && (date.day < subscription_at.day)
+          date.day
+        else
+          subscription_at.day
+        end
 
         if date.day < day
-          year = date.month == 1 ? date.year - 1 : date.year
-          month = date.month == 1 ? 12 : date.month - 1
+          year = (date.month == 1) ? date.year - 1 : date.year
+          month = (date.month == 1) ? 12 : date.month - 1
         else
           year = date.year
           month = date.month

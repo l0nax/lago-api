@@ -4,12 +4,9 @@ module Api
   module V1
     class WalletTransactionsController < Api::BaseController
       def create
-        service = WalletTransactions::CreateService.new
-        result = service.create(
-          organization_id: current_organization.id,
-          wallet_id: input_params[:wallet_id],
-          paid_credits: input_params[:paid_credits],
-          granted_credits: input_params[:granted_credits],
+        result = WalletTransactions::CreateService.call(
+          organization: current_organization,
+          params: input_params
         )
 
         if result.success?
@@ -17,8 +14,8 @@ module Api
             json: ::CollectionSerializer.new(
               result.wallet_transactions,
               ::V1::WalletTransactionSerializer,
-              collection_name: 'wallet_transactions',
-            ),
+              collection_name: "wallet_transactions"
+            )
           )
         else
           render_error_response(result)
@@ -26,15 +23,17 @@ module Api
       end
 
       def index
-        query = WalletTransactionsQuery.new(organization: current_organization)
-        result = query.call(
+        result = WalletTransactionsQuery.call(
+          organization: current_organization,
           wallet_id: params[:id],
-          page: params[:page],
-          limit: params[:per_page] || PER_PAGE,
+          pagination: {
+            page: params[:page],
+            limit: params[:per_page] || PER_PAGE
+          },
           filters: {
             status: params[:status],
-            transaction_type: params[:transaction_type],
-          },
+            transaction_type: params[:transaction_type]
+          }
         )
 
         return render_error_response(result) unless result.success?
@@ -43,9 +42,24 @@ module Api
           json: ::CollectionSerializer.new(
             result.wallet_transactions,
             ::V1::WalletTransactionSerializer,
-            collection_name: 'wallet_transactions',
-            meta: pagination_metadata(result.wallet_transactions),
-          ),
+            collection_name: "wallet_transactions",
+            meta: pagination_metadata(result.wallet_transactions)
+          )
+        )
+      end
+
+      def show
+        wallet_transaction = current_organization.wallet_transactions.find_by(
+          id: params[:id]
+        )
+
+        return not_found_error(resource: "wallet_transaction") unless wallet_transaction
+
+        render(
+          json: ::V1::WalletTransactionSerializer.new(
+            wallet_transaction,
+            root_name: "wallet_transaction"
+          )
         )
       end
 
@@ -55,8 +69,18 @@ module Api
         @input_params ||= params.require(:wallet_transaction).permit(
           :wallet_id,
           :paid_credits,
-          :granted_credits
+          :granted_credits,
+          :voided_credits,
+          :invoice_requires_successful_payment,
+          metadata: [
+            :key,
+            :value
+          ]
         )
+      end
+
+      def resource_name
+        "wallet_transaction"
       end
     end
   end

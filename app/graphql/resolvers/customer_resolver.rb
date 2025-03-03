@@ -5,18 +5,18 @@ module Resolvers
     include AuthenticableApiUser
     include RequiredOrganization
 
-    description 'Query a single customer of an organization'
+    REQUIRED_PERMISSION = "customers:view"
 
-    argument :id, ID, required: true, description: 'Uniq ID of the customer'
+    description "Query a single customer of an organization"
 
-    type Types::Customers::SingleObject, null: true
+    argument :id, ID, required: true, description: "Uniq ID of the customer"
+
+    type Types::Customers::Object, null: true
 
     def resolve(id: nil)
-      validate_organization!
-
       current_organization.customers.find(id)
     rescue ActiveRecord::RecordNotFound
-      not_found_error(resource: 'customer')
+      not_found_error(resource: "customer")
     end
   end
 end

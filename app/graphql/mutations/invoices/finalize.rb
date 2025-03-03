@@ -6,17 +6,18 @@ module Mutations
       include AuthenticableApiUser
       include RequiredOrganization
 
-      graphql_name 'FinalizeInvoice'
-      description 'Finalize a draft invoice'
+      REQUIRED_PERMISSION = "invoices:update"
+
+      graphql_name "FinalizeInvoice"
+      description "Finalize a draft invoice"
 
       argument :id, ID, required: true
 
       type Types::Invoices::Object
 
       def resolve(**args)
-        validate_organization!
-        result = ::Invoices::FinalizeService.call(
-          invoice: current_organization.invoices.draft.find_by(id: args[:id]),
+        result = ::Invoices::RefreshDraftAndFinalizeService.call(
+          invoice: current_organization.invoices.draft.find_by(id: args[:id])
         )
         result.success? ? result.invoice : result_error(result)
       end

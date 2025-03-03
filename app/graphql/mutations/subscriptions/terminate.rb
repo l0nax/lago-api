@@ -6,16 +6,16 @@ module Mutations
       include AuthenticableApiUser
       include RequiredOrganization
 
-      graphql_name 'TerminateSubscription'
-      description 'Terminate a Subscription'
+      REQUIRED_PERMISSION = "subscriptions:update"
+
+      graphql_name "TerminateSubscription"
+      description "Terminate a Subscription"
 
       argument :id, ID, required: true
 
       type Types::Subscriptions::Object
 
       def resolve(**args)
-        validate_organization!
-
         subscription = current_organization.subscriptions.find_by(id: args[:id])
         result = ::Subscriptions::TerminateService.call(subscription:)
 

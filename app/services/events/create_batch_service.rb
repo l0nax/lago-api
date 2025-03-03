@@ -2,82 +2,95 @@
 
 module Events
   class CreateBatchService < BaseService
-    ALL_REQUIRED_PARAMS = %i[transaction_id code external_subscription_ids].freeze
+    MAX_LENGTH = ENV.fetch("LAGO_EVENTS_BATCH_MAX_LENGTH", 100).to_i
 
-    def validate_params(params:)
-      params_errors = ALL_REQUIRED_PARAMS.each_with_object({}) do |key, errors|
-        errors[key] = ['value_is_mandatory'] if params[key].blank?
-      end
-      return result if params_errors.blank?
+    def initialize(organization:, events_params:, timestamp:, metadata:)
+      @organization = organization
+      @events_params = events_params[:events]
+      @timestamp = timestamp
+      @metadata = metadata
 
-      result.validation_failure!(errors: params_errors)
+      super
     end
 
-    def call(organization:, params:, timestamp:, metadata:)
-      customer = organization.subscriptions.find_by(
-        external_id: params[:external_subscription_ids]&.first,
-      )&.customer
-
-      Events::ValidateCreationService.call(
-        organization: organization,
-        params: params,
-        customer: customer,
-        result: result,
-        batch: true,
-      )
-      return result unless result.success?
-
-      events = []
-      ActiveRecord::Base.transaction do
-        params[:external_subscription_ids].each do |id|
-          subscription = Subscription.find_by(external_id: id)
-          event = organization.events.find_by(transaction_id: params[:transaction_id], subscription_id: subscription.id)
-
-          if event
-            events << event
-
-            next
-          end
-
-          event = organization.events.new
-          event.code = params[:code]
-          event.transaction_id = params[:transaction_id]
-          event.customer = customer
-          event.subscription_id = subscription.id
-          event.properties = params[:properties] || {}
-          event.metadata = metadata || {}
-
-          event.timestamp = Time.zone.at(params[:timestamp]) if params[:timestamp]
-          event.timestamp ||= timestamp
-
-          event.save!
-          handle_persisted_event(event)
-
-          events << event
-        rescue ActiveRecord::RecordInvalid => e
-          result.record_validation_failure!(record: e.record)
-
-          if organization.webhook_url?
-            SendWebhookJob.perform_later(
-              :event,
-              { input_params: params, error: result.error, organization_id: organization.id },
-            )
-          end
-
-          return result
-        end
+    def call
+      if events_params.blank?
+        return result.single_validation_failure!(error_code: "no_events", field: :events)
       end
 
-      result.events = events
+      if events_params.count > MAX_LENGTH
+        return result.single_validation_failure!(error_code: "too_many_events", field: :events)
+      end
+
+      validate_events
+
+      return result.validation_failure!(errors: result.errors) if result.errors.present?
+
+      post_validate_events
+
       result
     end
 
-    def handle_persisted_event(event)
-      persisted_service = PersistedEvents::CreateOrUpdateService.new(event)
-      return unless persisted_service.matching_billable_metric?
+    private
 
-      service_result = persisted_service.call
-      service_result.raise_if_error!
+    attr_reader :organization, :events_params, :timestamp, :metadata
+
+    def validate_events
+      result.events = []
+      result.errors = {}
+
+      events_params.each_with_index do |event_params, index|
+        event = Event.new
+        event.organization_id = organization.id
+        event.code = event_params[:code]
+        event.transaction_id = event_params[:transaction_id]
+        event.external_subscription_id = event_params[:external_subscription_id]
+        event.properties = event_params[:properties] || {}
+        event.metadata = metadata || {}
+        event.timestamp = Time.zone.at(event_params[:timestamp] ? Float(event_params[:timestamp]) : timestamp)
+        event.precise_total_amount_cents = event_params[:precise_total_amount_cents]
+
+        expression_result = CalculateExpressionService.call(organization:, event:)
+        result.errors[index] = expression_result.error.message unless expression_result.success?
+
+        result.events.push(event)
+        result.errors[index] = event.errors.messages unless event.valid?
+      rescue ArgumentError
+        result.errors = result.errors.merge({index => {timestamp: ["invalid_format"]}})
+      end
+    end
+
+    def post_validate_events
+      ActiveRecord::Base.transaction do
+        result.events.each(&:save!)
+      end
+
+      result.events.each do |event|
+        produce_kafka_event(event)
+        Events::PostProcessJob.perform_later(event:)
+      end
+    end
+
+    def produce_kafka_event(event)
+      return if ENV["LAGO_KAFKA_BOOTSTRAP_SERVERS"].blank?
+      return if ENV["LAGO_KAFKA_RAW_EVENTS_TOPIC"].blank?
+
+      Karafka.producer.produce_async(
+        topic: ENV["LAGO_KAFKA_RAW_EVENTS_TOPIC"],
+        key: "#{organization.id}-#{event.external_subscription_id}",
+        payload: {
+          organization_id: organization.id,
+          external_customer_id: event.external_customer_id,
+          external_subscription_id: event.external_subscription_id,
+          transaction_id: event.transaction_id,
+          timestamp: event.timestamp.to_f,
+          code: event.code,
+          properties: event.properties,
+          ingested_at: Time.zone.now.iso8601[...-1],
+          precise_total_amount_cents: event.precise_total_amount_cents.present? ? event.precise_total_amount_cents.to_s : "0.0",
+          source: "http_ruby"
+        }.to_json
+      )
     end
   end
 end

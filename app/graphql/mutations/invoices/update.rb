@@ -5,17 +5,18 @@ module Mutations
     class Update < BaseMutation
       include AuthenticableApiUser
 
-      graphql_name 'UpdateInvoice'
-      description 'Update an existing invoice'
+      REQUIRED_PERMISSION = "invoices:update"
 
-      argument :id, ID, required: true
-      argument :payment_status, Types::Invoices::PaymentStatusTypeEnum, required: false
+      description "Update an existing invoice"
+      graphql_name "UpdateInvoice"
+
+      input_object_class Types::Invoices::UpdateInvoiceInput
 
       type Types::Invoices::Object
 
       def resolve(**args)
-        invoice = context[:current_organization].invoices.find_by(id: args[:id])
-        result = ::Invoices::UpdateService.new(invoice:, params: args).call
+        invoice = context[:current_organization].invoices.visible.find_by(id: args[:id])
+        result = ::Invoices::UpdateService.new(invoice:, params: args, webhook_notification: true).call
 
         result.success? ? result.invoice : result_error(result)
       end

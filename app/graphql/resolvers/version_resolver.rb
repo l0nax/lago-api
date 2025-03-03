@@ -1,14 +1,13 @@
-# freozen_string_literal: true
+# frozen_string_literal: true
 
 module Resolvers
   class VersionResolver < Resolvers::BaseResolver
-    description 'Retrieve the version of the application'
+    description "Retrieve the version of the application"
 
     type Types::Utils::CurrentVersion, null: false
 
     def resolve
-      result = Utils::VersionService.new.version
-      result.version
+      LAGO_VERSION
     end
   end
 end

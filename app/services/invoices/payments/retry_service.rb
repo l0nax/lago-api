@@ -4,9 +4,11 @@ module Invoices
   module Payments
     class RetryService < BaseService
       WEBHOOK_TYPE = {
-        'subscription' => 'invoice.created',
-        'credit' => 'invoice.paid_credit_added',
-        'add_on' => 'invoice.add_on_added',
+        "subscription" => "invoice.created",
+        "credit" => "invoice.paid_credit_added",
+        "add_on" => "invoice.add_on_added",
+        "one_off" => "invoice.one_off_created",
+        "progressive_billing" => "invoice.created"
       }.freeze
 
       def initialize(invoice:)
@@ -16,15 +18,18 @@ module Invoices
       end
 
       def call
-        return result.not_found_failure!(resource: 'invoice') if invoice.blank?
-        return result.not_allowed_failure!(code: 'invalid_status') if invoice.draft? || invoice.succeeded?
+        return result.not_found_failure!(resource: "invoice") if invoice.blank?
 
-        unless invoice.ready_for_payment_processing?
-          return result.not_allowed_failure!(code: 'payment_processor_is_currently_handling_payment')
+        if invoice.draft? || invoice.voided? || invoice.payment_succeeded?
+          return result.not_allowed_failure!(code: "invalid_status")
         end
 
-        deliver_webhook if customer&.organization&.webhook_url?
-        Invoices::Payments::CreateService.new(invoice).call
+        unless invoice.ready_for_payment_processing?
+          return result.not_allowed_failure!(code: "payment_processor_is_currently_handling_payment")
+        end
+
+        deliver_webhook
+        Invoices::Payments::CreateService.call_async(invoice:)
 
         result.invoice = invoice
 

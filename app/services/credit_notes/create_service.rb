@@ -17,70 +17,81 @@ module CreditNotes
     end
 
     def call
-      return result.not_found_failure!(resource: 'invoice') unless invoice
+      return result.not_found_failure!(resource: "invoice") unless invoice
       return result.forbidden_failure! unless should_create_credit_note?
-      return result.not_allowed_failure!(code: 'invalid_type_or_status') unless valid_type_or_status?
+      return result.not_allowed_failure!(code: "invalid_type_or_status") unless valid_type_or_status?
 
       ActiveRecord::Base.transaction do
         result.credit_note = CreditNote.create!(
           customer: invoice.customer,
           invoice:,
           issuing_date:,
-          total_amount_currency: invoice.amount_currency,
-          vat_amount_currency: invoice.amount_currency,
-          credit_amount_currency: invoice.amount_currency,
-          credit_vat_amount_currency: invoice.amount_currency,
-          refund_amount_currency: invoice.amount_currency,
-          refund_vat_amount_currency: invoice.amount_currency,
-          balance_amount_currency: invoice.amount_currency,
+          total_amount_currency: invoice.currency,
+          credit_amount_currency: invoice.currency,
+          refund_amount_currency: invoice.currency,
+          balance_amount_currency: invoice.currency,
           credit_amount_cents:,
           refund_amount_cents:,
           reason:,
           description:,
-          credit_status: 'available',
-          status: invoice.status,
+          credit_status: "available",
+          status: invoice.status
         )
 
         create_items
-        return result unless result.success?
+        result.raise_if_error!
+
+        compute_amounts_and_taxes
 
         valid_credit_note?
         result.raise_if_error!
 
-        credit_note.credit_status = 'available' if credit_note.credited?
-        credit_note.refund_status = 'pending' if credit_note.refunded?
+        credit_note.credit_status = "available" if credit_note.credited?
+        credit_note.refund_status = "pending" if credit_note.refunded?
 
         credit_note.update!(
           total_amount_cents: credit_note.credit_amount_cents + credit_note.refund_amount_cents,
-          vat_amount_cents: credit_note.items.sum { |i| i.amount_cents * i.fee.vat_rate }.fdiv(100).round,
-          balance_amount_cents: credit_note.credit_amount_cents,
+          balance_amount_cents: credit_note.credit_amount_cents
         )
+        if invoice.credit?
+          WalletTransactions::VoidService.call(wallet: associated_wallet,
+            credits_amount: voiding_credits, credit_note_id: credit_note.id)
+        end
       end
 
       if credit_note.finalized?
-        track_credit_note_created
-        deliver_webhook
-        handle_refund if should_handle_refund?
+        after_commit do
+          track_credit_note_created
+          deliver_webhook
+          CreditNotes::GeneratePdfJob.perform_later(credit_note)
+          deliver_email
+          handle_refund if should_handle_refund?
+          report_to_tax_provider
+
+          if credit_note.should_sync_credit_note?
+            Integrations::Aggregator::CreditNotes::CreateJob.perform_later(credit_note:)
+          end
+        end
       end
 
       result
     rescue ActiveRecord::RecordInvalid => e
       result.record_validation_failure!(record: e.record)
     rescue ArgumentError
-      result.single_validation_failure!(field: :reason, error_code: 'value_is_invalid')
-    rescue BaseService::ValidationFailure
-      result
+      result.single_validation_failure!(field: :reason, error_code: "value_is_invalid")
+    rescue BaseService::FailedResult => e
+      e.result
     end
 
     private
 
     attr_accessor :invoice,
-                  :items_attr,
-                  :reason,
-                  :description,
-                  :credit_amount_cents,
-                  :refund_amount_cents,
-                  :automatic
+      :items_attr,
+      :reason,
+      :description,
+      :credit_amount_cents,
+      :refund_amount_cents,
+      :automatic
 
     delegate :credit_note, to: :result
     delegate :customer, to: :invoice
@@ -95,9 +106,9 @@ module CreditNotes
 
     def valid_type_or_status?
       return true if automatic
-      return false if invoice.credit?
+      return false if invoice.credit? && (invoice.payment_status != "succeeded" || associated_wallet.nil?)
 
-      !invoice.legacy?
+      invoice.version_number >= Invoice::CREDIT_NOTES_MIN_VERSION
     end
 
     # NOTE: issuing_date must be in customer time zone (accounting date)
@@ -106,6 +117,8 @@ module CreditNotes
     end
 
     def create_items
+      return result.validation_failure!(errors: {items: ["must_be_an_array"]}) unless items_attr.is_a?(Array)
+
       items_attr.each do |item_attr|
         amount_cents = item_attr[:amount_cents] || 0
 
@@ -113,63 +126,61 @@ module CreditNotes
           fee: invoice.fees.find_by(id: item_attr[:fee_id]),
           amount_cents: amount_cents.round,
           precise_amount_cents: amount_cents,
-          amount_currency: invoice.amount_currency,
+          amount_currency: invoice.currency
         )
         break unless valid_item?(item)
 
         item.save!
-        refresh_vat_amounts
       end
     end
 
     def valid_item?(item)
-      CreditNotes::ValidateItemService.new(result, item: item).valid?
+      CreditNotes::ValidateItemService.new(result, item:).valid?
     end
 
     def valid_credit_note?
       CreditNotes::ValidateService.new(result, item: credit_note).valid?
     end
 
-    def refresh_vat_amounts
-      credit_note.credit_vat_amount_cents = compute_vat_amount(credit_note.credit_amount_cents)
-      credit_note.refund_vat_amount_cents = compute_vat_amount(credit_note.refund_amount_cents)
-    end
-
-    def compute_vat_amount(total_amount)
-      total_amount - total_amount.fdiv(1 + (invoice.vat_rate || 0).fdiv(100))
-    end
-
     def track_credit_note_created
       types = if credit_note.credited? && credit_note.refunded?
-        'both'
+        "both"
       elsif credit_note.credited?
-        'credit'
+        "credit"
       elsif credit_note.refunded?
-        'refund'
+        "refund"
       end
 
       SegmentTrackJob.perform_later(
         membership_id: CurrentContext.membership,
-        event: 'credit_note_issued',
+        event: "credit_note_issued",
         properties: {
           organization_id: credit_note.organization.id,
           credit_note_id: credit_note.id,
           invoice_id: credit_note.invoice_id,
-          credit_note_method: types,
-        },
+          credit_note_method: types
+        }
       )
     end
 
     def deliver_webhook
       SendWebhookJob.perform_later(
-        'credit_note.created',
-        credit_note,
+        "credit_note.created",
+        credit_note
       )
+    end
+
+    def deliver_email
+      # NOTE: We already check the premium state for the credit note creation
+      return unless credit_note.organization.email_settings.include?("credit_note.created")
+
+      CreditNoteMailer.with(credit_note:)
+        .created.deliver_later(wait: 3.seconds)
     end
 
     def should_handle_refund?
       return false unless credit_note.refunded?
-      return false unless credit_note.invoice.succeeded?
+      return false unless credit_note.invoice.payment_succeeded?
 
       invoice_payment.present?
     end
@@ -184,7 +195,56 @@ module CreditNotes
         CreditNotes::Refunds::StripeCreateJob.perform_later(credit_note)
       when PaymentProviders::GocardlessProvider
         CreditNotes::Refunds::GocardlessCreateJob.perform_later(credit_note)
+      when PaymentProviders::AdyenProvider
+        CreditNotes::Refunds::AdyenCreateJob.perform_later(credit_note)
       end
+    end
+
+    def report_to_tax_provider
+      CreditNotes::ProviderTaxes::ReportJob.perform_later(credit_note:)
+    end
+
+    def compute_amounts_and_taxes
+      taxes_result = CreditNotes::ApplyTaxesService.call(
+        invoice:,
+        items: credit_note.items
+      )
+
+      credit_note.precise_coupons_adjustment_amount_cents = taxes_result.coupons_adjustment_amount_cents
+      credit_note.coupons_adjustment_amount_cents = taxes_result.coupons_adjustment_amount_cents.round
+      credit_note.precise_taxes_amount_cents = taxes_result.taxes_amount_cents
+      adjust_credit_note_tax_rounding if credit_note_for_all_remaining_amount?
+
+      credit_note.taxes_amount_cents = credit_note.precise_taxes_amount_cents.round
+      credit_note.taxes_rate = taxes_result.taxes_rate
+
+      taxes_result.applied_taxes.each { |applied_tax| credit_note.applied_taxes << applied_tax }
+    end
+
+    def credit_note_for_all_remaining_amount?
+      credit_note.invoice.creditable_amount_cents == 0
+    end
+
+    def adjust_credit_note_tax_rounding
+      credit_note.precise_taxes_amount_cents -= all_rounding_tax_adjustments
+    end
+
+    def all_rounding_tax_adjustments
+      credit_note.invoice.credit_notes.sum(&:taxes_rounding_adjustment)
+    end
+
+    def associated_wallet
+      @associated_wallet ||= invoice.associated_active_wallet
+    end
+
+    def voiding_credits
+      return 0 unless invoice.credit? && associated_wallet.present?
+
+      # wallet transactions don't have cents amount, so we have to convert value into full amount
+      # and then convert money into amount of credits
+      amount_cents = credit_note.refund_amount_cents
+      amount = amount_cents.fdiv(credit_note.refund_amount.currency.subunit_to_unit)
+      amount.fdiv(associated_wallet.rate_amount)
     end
   end
 end

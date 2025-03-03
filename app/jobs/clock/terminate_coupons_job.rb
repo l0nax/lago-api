@@ -2,10 +2,18 @@
 
 module Clock
   class TerminateCouponsJob < ApplicationJob
-    queue_as 'clock'
+    include SentryCronConcern
+
+    queue_as do
+      if ActiveModel::Type::Boolean.new.cast(ENV["SIDEKIQ_CLOCK"])
+        :clock_worker
+      else
+        :clock
+      end
+    end
 
     def perform
-      Coupons::TerminateService.new.terminate_all_expired
+      Coupons::TerminateService.terminate_all_expired
     end
   end
 end

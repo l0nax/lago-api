@@ -4,91 +4,67 @@ module Api
   class BaseController < ApplicationController
     include Pagination
     include Common
+    include ApiErrors
 
     before_action :authenticate
     before_action :set_context_source
+    before_action :track_api_key_usage
+    before_action :authorize
     include Trackable
+
+    rescue_from ActionController::ParameterMissing, with: :bad_request_error
 
     private
 
+    attr_reader :current_api_key, :current_organization
+
     def authenticate
-      auth_header = request.headers['Authorization']
+      return unauthorized_error unless auth_token
 
-      return unauthorized_error unless auth_header
+      @current_api_key, organization = ApiKeys::CacheService.call(auth_token, with_cache: cached_api_key?)
+      return unauthorized_error unless current_api_key
 
-      api_key = auth_header.split(' ').second
-
-      return unauthorized_error unless api_key
-      return unauthorized_error unless current_organization(api_key)
-
+      @current_organization = organization
       true
     end
 
-    def unauthorized_error
-      render(
-        json: {
-          status: 401,
-          error: 'Unauthorized',
-        },
-        status: :unauthorized,
-      )
-    end
-
-    def validation_errors(errors:)
-      render(
-        json: {
-          status: 422,
-          error: 'Unprocessable Entity',
-          code: 'validation_errors',
-          error_details: errors,
-        },
-        status: :unprocessable_entity,
-      )
-    end
-
-    def forbidden_error(code:)
-      render(
-        json: {
-          status: 403,
-          error: 'Forbidden',
-          code: code,
-        },
-        status: :forbidden,
-      )
-    end
-
-    def method_not_allowed_error(code:)
-      render(
-        json: {
-          status: 405,
-          error: 'Method Not Allowed',
-          code: code,
-        },
-        status: :method_not_allowed,
-      )
-    end
-
-    def render_error_response(error_result)
-      case error_result.error
-      when BaseService::NotFoundFailure
-        not_found_error(resource: error_result.error.resource)
-      when BaseService::MethodNotAllowedFailure
-        method_not_allowed_error(code: error_result.error.code)
-      when BaseService::ValidationFailure
-        validation_errors(errors: error_result.error.messages)
-      when BaseService::ForbiddenFailure
-        forbidden_error(code: error_result.error.code)
-      else
-        raise(error_result.error)
-      end
-    end
-
-    def current_organization(api_key = nil)
-      @current_organization ||= Organization.find_by(api_key: api_key)
+    def auth_token
+      request.headers["Authorization"]&.split(" ")&.second
     end
 
     def set_context_source
-      CurrentContext.source = 'api'
+      CurrentContext.source = "api"
+    end
+
+    def track_api_key_usage
+      return unless track_api_key_usage?
+
+      Rails.cache.write(
+        "api_key_last_used_#{current_api_key.id}",
+        Time.current.iso8601
+      )
+    end
+
+    def track_api_key_usage?
+      true
+    end
+
+    def authorize
+      return if current_api_key.permit?(resource_name, mode)
+
+      forbidden_error(code: "#{mode}_action_not_allowed_for_#{resource_name}")
+    end
+
+    def resource_name
+      nil
+    end
+
+    def mode
+      (request.method == "GET") ? "read" : "write"
+    end
+
+    def cached_api_key?
+      false
     end
   end
 end

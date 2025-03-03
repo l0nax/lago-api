@@ -5,18 +5,18 @@ module Resolvers
     include AuthenticableApiUser
     include RequiredOrganization
 
-    description 'Query a single billable metric of an organization'
+    REQUIRED_PERMISSION = "billable_metrics:view"
 
-    argument :id, ID, required: true, description: 'Uniq ID of the billable metric'
+    description "Query a single billable metric of an organization"
 
-    type Types::BillableMetrics::SingleObject, null: true
+    argument :id, ID, required: true, description: "Uniq ID of the billable metric"
+
+    type Types::BillableMetrics::Object, null: true
 
     def resolve(id: nil)
-      validate_organization!
-
       current_organization.billable_metrics.find(id)
     rescue ActiveRecord::RecordNotFound
-      not_found_error(resource: 'billable_metric')
+      not_found_error(resource: "billable_metric")
     end
   end
 end

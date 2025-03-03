@@ -1,0 +1,82 @@
+---
+analytics:
+  overdue_balances:
+    view: true
+  view: false
+billable_metrics:
+  view: false
+  create: false
+  update: false
+  delete: false
+data_api:
+  revenue_streams:
+    view: false
+plans:
+  create: false
+  update: false
+  delete: false
+addons:
+  create: false
+  update: false
+  delete: false
+coupons:
+  create: false
+  update: false
+  delete: false
+  attach: true
+  detach: true
+customers:
+  create: true
+  update: true
+  delete: true
+dunning_campaigns:
+  view: true
+  create: false
+  update: false
+  delete: false
+invoice_custom_sections:
+  create: false
+  update: false
+  delete: false
+subscriptions:
+  create: true
+  update: true
+wallets:
+  create: true
+  update: true
+  top_up: true
+  terminate: true
+invoices:
+  create: true
+developers:
+  manage: false
+  keys:
+    manage: false
+organization:
+  view: false
+  update: false
+  invoices:
+    view: false
+    update: false
+  taxes:
+    view: false
+    update: false
+  emails:
+    view: false
+    update: false
+  integrations:
+    view: false
+    create: false
+    update: false
+    delete: false
+  members:
+    view: false
+    create: false
+    update: false
+    delete: false
+payment_requests:
+  view: true
+  create: true
+payments:
+  view: true
+  create: true

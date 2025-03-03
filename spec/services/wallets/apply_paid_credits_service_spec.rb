@@ -1,45 +1,26 @@
 # frozen_string_literal: true
 
-require 'rails_helper'
+require "rails_helper"
 
 RSpec.describe Wallets::ApplyPaidCreditsService, type: :service do
-  subject(:service) { described_class.new }
+  subject(:service) { described_class.new(wallet_transaction:) }
 
-  describe '.call' do
-    let(:invoice) { create(:invoice, customer:, organization: customer.organization) }
-    let(:customer) { create(:customer) }
-    let(:subscription) { create(:subscription, customer:) }
-    let(:wallet) { create(:wallet, customer:, balance: 10.0, credits_balance: 10.0) }
+  describe ".call" do
+    let(:wallet) { create(:wallet, balance_cents: 1000, credits_balance: 10.0) }
     let(:wallet_transaction) do
-      create(:wallet_transaction, wallet:, amount: 15.0, credit_amount: 15.0, status: 'pending')
-    end
-    let(:fee) do
-      create(
-        :fee,
-        fee_type: 'credit',
-        invoiceable_type: 'WalletTransaction',
-        invoiceable_id: wallet_transaction.id,
-        invoice:,
-      )
+      create(:wallet_transaction, wallet:, amount: 15.0, credit_amount: 15.0, status: "pending")
     end
 
-    before do
-      wallet_transaction
-      fee
-      subscription
-      invoice.update(invoice_type: 'credit')
+    it "updates wallet balance" do
+      service.call
+
+      expect(wallet.reload.balance_cents).to eq 2500
     end
 
-    it 'updates wallet balance' do
-      service.call(invoice)
+    it "settles the wallet transaction" do
+      result = service.call
 
-      expect(wallet.reload.balance).to eq 25.0
-    end
-
-    it 'settles the wallet transaction' do
-      service.call(invoice)
-
-      expect(wallet_transaction.reload.status).to eq('settled')
+      expect(result.wallet_transaction.status).to eq("settled")
     end
   end
 end

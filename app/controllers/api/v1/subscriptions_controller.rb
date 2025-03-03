@@ -5,31 +5,23 @@ module Api
     class SubscriptionsController < Api::BaseController
       def create
         customer = Customer.find_or_initialize_by(
-          external_id: create_params[:external_customer_id]&.strip,
-          organization_id: current_organization.id,
+          external_id: create_params[:external_customer_id].to_s.strip,
+          organization_id: current_organization.id
         )
 
-        plan = Plan.find_by(
+        plan = Plan.parents.find_by(
           code: create_params[:plan_code],
-          organization_id: current_organization.id,
+          organization_id: current_organization.id
         )
 
         result = Subscriptions::CreateService.call(
           customer:,
           plan:,
-          params: SubscriptionLegacyInput.new(
-            current_organization,
-            create_params,
-          ).create_input,
+          params: create_params.to_h
         )
 
         if result.success?
-          render(
-            json: ::V1::SubscriptionSerializer.new(
-              result.subscription,
-              root_name: 'subscription',
-            ),
-          )
+          render_subscription(result.subscription)
         else
           render_error_response(result)
         end
@@ -37,61 +29,80 @@ module Api
 
       # NOTE: We can't destroy a subscription, it will terminate it
       def terminate
-        subscription = current_organization.subscriptions.active.find_by(external_id: params[:external_id])
+        query = current_organization.subscriptions.where(external_id: params[:external_id])
+        subscription = if params[:status] == "pending"
+          query.pending
+        else
+          query.active
+        end.first
+
         result = Subscriptions::TerminateService.call(subscription:)
 
         if result.success?
-          render(
-            json: ::V1::SubscriptionSerializer.new(
-              result.subscription,
-              root_name: 'subscription',
-            ),
-          )
+          render_subscription(result.subscription)
         else
           render_error_response(result)
         end
       end
 
       def update
-        service = Subscriptions::UpdateService.new
+        query = current_organization.subscriptions
+          .where(external_id: params[:external_id])
+          .order(subscription_at: :desc)
+        subscription = if query.count > 1
+          if params[:status] == "pending"
+            query.pending
+          else
+            query.active
+          end
+        else
+          query
+        end.first
 
-        result = service.update(
-          subscription: current_organization.subscriptions.find_by(external_id: params[:external_id]),
-          args: SubscriptionLegacyInput.new(
-            current_organization,
-            update_params,
-          ).update_input,
+        result = Subscriptions::UpdateService.call(
+          subscription:,
+          params: update_params.to_h
         )
 
         if result.success?
-          render(
-            json: ::V1::SubscriptionSerializer.new(
-              result.subscription,
-              root_name: 'subscription',
-            ),
-          )
+          render_subscription(result.subscription)
         else
           render_error_response(result)
         end
       end
 
-      def index
-        customer = current_organization.customers.find_by(external_id: params[:external_customer_id])
-
-        return not_found_error(resource: 'customer') unless customer
-
-        subscriptions = customer.active_subscriptions
-          .page(params[:page])
-          .per(params[:per_page] || PER_PAGE)
-
-        render(
-          json: ::CollectionSerializer.new(
-            subscriptions,
-            ::V1::SubscriptionSerializer,
-            collection_name: 'subscriptions',
-            meta: pagination_metadata(subscriptions),
-          ),
+      def show
+        subscription = current_organization.subscriptions.find_by(
+          external_id: params[:external_id],
+          status: params[:status] || :active
         )
+        return not_found_error(resource: "subscription") unless subscription
+
+        render_subscription(subscription)
+      end
+
+      def index
+        result = SubscriptionsQuery.call(
+          organization: current_organization,
+          pagination: {
+            page: params[:page],
+            limit: params[:per_page] || PER_PAGE
+          },
+          filters: index_filters
+        )
+
+        if result.success?
+          render(
+            json: ::CollectionSerializer.new(
+              result.subscriptions,
+              ::V1::SubscriptionSerializer,
+              collection_name: "subscriptions",
+              meta: pagination_metadata(result.subscriptions)
+            )
+          )
+        else
+          render_error_response(result)
+        end
       end
 
       private
@@ -106,11 +117,81 @@ module Api
             :billing_time,
             :subscription_date,
             :subscription_at,
+            :ending_at,
+            plan_overrides:
           )
       end
 
       def update_params
-        params.require(:subscription).permit(:name, :subscription_date, :subscription_at)
+        params.require(:subscription).permit(
+          :name,
+          :subscription_date,
+          :subscription_at,
+          :ending_at,
+          plan_overrides:
+        )
+      end
+
+      def plan_overrides
+        [
+          :amount_cents,
+          :amount_currency,
+          :description,
+          :name,
+          :invoice_display_name,
+          :trial_period,
+          {tax_codes: []},
+          {
+            minimum_commitment: [
+              :id,
+              :invoice_display_name,
+              :amount_cents,
+              {tax_codes: []}
+            ],
+            charges: [
+              :id,
+              :billable_metric_id,
+              :min_amount_cents,
+              :invoice_display_name,
+              :charge_model,
+              {properties: {}},
+              {
+                filters: [
+                  :invoice_display_name,
+                  {
+                    properties: {},
+                    values: {}
+                  }
+                ]
+              },
+              {tax_codes: []}
+            ],
+            usage_thresholds: [
+              :id,
+              :threshold_display_name,
+              :amount_cents,
+              :recurring
+            ]
+          }
+        ]
+      end
+
+      def index_filters
+        params.permit(:external_customer_id, :plan_code, status: [])
+      end
+
+      def render_subscription(subscription)
+        render(
+          json: ::V1::SubscriptionSerializer.new(
+            subscription,
+            root_name: "subscription",
+            includes: %i[plan]
+          )
+        )
+      end
+
+      def resource_name
+        "subscription"
       end
     end
   end

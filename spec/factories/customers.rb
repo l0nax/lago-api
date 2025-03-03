@@ -4,6 +4,9 @@ FactoryBot.define do
   factory :customer do
     organization
     name { Faker::TvShows::SiliconValley.character }
+    firstname { Faker::Name.first_name }
+    lastname { Faker::Name.last_name }
+    customer_type { nil }
     external_id { SecureRandom.uuid }
     country { Faker::Address.country_code }
     address_line1 { Faker::Address.street_address }
@@ -17,6 +20,60 @@ FactoryBot.define do
     logo_url { Faker::Internet.url }
     legal_name { Faker::Company.name }
     legal_number { Faker::Company.duns_number }
-    currency { 'EUR' }
+    currency { "EUR" }
+
+    after :build do |customer, values|
+      customer.billing_entity = values.organization.default_billing_entity unless customer.billing_entity
+    end
+
+    trait :with_shipping_address do
+      shipping_address_line1 { Faker::Address.street_address }
+      shipping_address_line2 { Faker::Address.secondary_address }
+      shipping_city { Faker::Address.city }
+      shipping_zipcode { Faker::Address.zip_code }
+      shipping_state { Faker::Address.state }
+      shipping_country { Faker::Address.country_code }
+    end
+
+    trait :with_same_billing_and_shipping_address do
+      shipping_address_line1 { address_line1 }
+      shipping_address_line2 { address_line2 }
+      shipping_city { city }
+      shipping_zipcode { zipcode }
+      shipping_state { state }
+      shipping_country { country }
+    end
+
+    trait :with_tax_integration do
+      after :create do |customer|
+        create(:anrok_customer, customer:)
+      end
+    end
+
+    trait :with_hubspot_integration do
+      after :create do |customer|
+        create(:hubspot_customer, customer:)
+      end
+    end
+
+    trait :with_salesforce_integration do
+      after :create do |customer|
+        create(:salesforce_customer, customer:)
+      end
+    end
+
+    trait :with_inherited_invoice_custom_sections do
+      organization { create(:organization, :with_invoice_custom_sections) }
+    end
+
+    trait :with_custom_invoice_custom_section_selections do
+      after :create do |customer|
+        customer.invoice_custom_section_selections = create_list(:invoice_custom_section, 3, organization: customer.organization)
+      end
+    end
+
+    trait :with_skipped_invoice_custom_section_selections do
+      skip_invoice_custom_sections { true }
+    end
   end
 end

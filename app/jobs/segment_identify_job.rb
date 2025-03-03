@@ -4,28 +4,28 @@ class SegmentIdentifyJob < ApplicationJob
   queue_as :default
 
   def perform(membership_id:)
-    return if ENV['LAGO_DISABLE_SEGMENT'] == 'true'
-    return if membership_id.nil? || membership_id == 'membership/unidentifiable'
+    return if ENV["LAGO_DISABLE_SEGMENT"] == "true"
+    return if membership_id.nil? || membership_id == "membership/unidentifiable"
 
-    membership = Membership.find(membership_id.sub(/\Amembership\//, ''))
+    membership = Membership.find(membership_id.delete_prefix("membership/"))
     traits = {
       created_at: membership.created_at,
-      hosting_type: hosting_type,
-      version: version,
+      hosting_type:,
+      version:,
       organization_name: membership.organization.name,
-      email: membership.user.email,
+      email: membership.user.email
     }
 
-    SEGMENT_CLIENT.identify(user_id: membership_id, traits: traits)
+    SEGMENT_CLIENT.identify(user_id: membership_id, traits:)
   end
 
   private
 
   def hosting_type
-    @hosting_type ||= ENV['LAGO_CLOUD'] == 'true' ? 'cloud' : 'self'
+    @hosting_type ||= (ENV["LAGO_CLOUD"] == "true") ? "cloud" : "self"
   end
 
   def version
-    Utils::VersionService.new.version.version.number
+    LAGO_VERSION.number
   end
 end

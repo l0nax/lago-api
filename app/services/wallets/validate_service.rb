@@ -6,9 +6,12 @@ module Wallets
       valid_customer?
       valid_paid_credits_amount? if args[:paid_credits]
       valid_granted_credits_amount? if args[:granted_credits]
+      valid_expiration_at? if args[:expiration_at]
+      valid_recurring_transaction_rules? if args[:recurring_transaction_rules].present?
+      valid_metadata? if args[:transaction_metadata]
 
       if errors?
-        result.validation_failure!(errors: errors)
+        result.validation_failure!(errors:)
         return false
       end
 
@@ -20,12 +23,12 @@ module Wallets
     def valid_customer?
       result.current_customer = args[:customer]
 
-      return add_error(field: :customer, error_code: 'customer_not_found') unless result.current_customer
+      return add_error(field: :customer, error_code: "customer_not_found") unless result.current_customer
 
       if result.current_customer.wallets.active.exists?
         return add_error(
           field: :customer,
-          error_code: 'wallet_already_exists',
+          error_code: "wallet_already_exists"
         )
       end
 
@@ -35,13 +38,54 @@ module Wallets
     def valid_paid_credits_amount?
       return true if ::Validators::DecimalAmountService.new(args[:paid_credits]).valid_amount?
 
-      add_error(field: :paid_credits, error_code: 'invalid_paid_credits')
+      add_error(field: :paid_credits, error_code: "invalid_paid_credits")
     end
 
     def valid_granted_credits_amount?
       return true if ::Validators::DecimalAmountService.new(args[:granted_credits]).valid_amount?
 
-      add_error(field: :granted_credits, error_code: 'invalid_granted_credits')
+      add_error(field: :granted_credits, error_code: "invalid_granted_credits")
+    end
+
+    def valid_expiration_at?
+      return true if args[:expiration_at].blank?
+
+      future = Utils::Datetime.valid_format?(args[:expiration_at]) && expiration_at.to_date > Time.current.to_date
+      return true if future
+
+      add_error(field: :expiration_at, error_code: "invalid_date")
+
+      false
+    end
+
+    def expiration_at
+      @expiration_at ||= if args[:expiration_at].is_a?(String)
+        DateTime.strptime(args[:expiration_at])
+      else
+        args[:expiration_at]
+      end
+    end
+
+    def valid_recurring_transaction_rules?
+      if args[:recurring_transaction_rules].count > 1
+        return add_error(field: :recurring_transaction_rules, error_code: "invalid_number_of_recurring_rules")
+      end
+
+      unless Wallets::RecurringTransactionRules::ValidateService.call(params: args[:recurring_transaction_rules].first)
+        add_error(field: :recurring_transaction_rules, error_code: "invalid_recurring_rule")
+      end
+    end
+
+    def valid_metadata?
+      validator = ::Validators::MetadataValidator.new(args[:transaction_metadata])
+      unless validator.valid?
+        validator.errors.each do |field, error_code|
+          add_error(field: field, error_code: error_code)
+        end
+        return false
+      end
+
+      true
     end
   end
 end

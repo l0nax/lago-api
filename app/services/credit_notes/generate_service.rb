@@ -10,12 +10,11 @@ module CreditNotes
     end
 
     def call
-      return result.not_found_failure!(resource: 'credit_note') if credit_note.blank?
-      return result.not_found_failure!(resource: 'credit_note') unless credit_note.finalized?
+      return result.not_found_failure!(resource: "credit_note") if credit_note.blank? || !credit_note.finalized?
 
-      generate_pdf(credit_note) if credit_note.file.blank?
+      generate_pdf(credit_note) if should_generate_pdf?
 
-      SendWebhookJob.perform_later('credit_note.generated', credit_note) if should_send_webhook?
+      SendWebhookJob.perform_later("credit_note.generated", credit_note)
 
       result.credit_note = credit_note
       result
@@ -28,20 +27,25 @@ module CreditNotes
     def generate_pdf(credit_note)
       I18n.locale = credit_note.customer.preferred_document_locale
 
-      pdf_service = Utils::PdfGenerator.new(template: 'credit_note', context: credit_note)
-      pdf_result = pdf_service.call
+      pdf_result = Utils::PdfGenerator.call(template:, context: credit_note)
 
       credit_note.file.attach(
         io: pdf_result.io,
         filename: "#{credit_note.number}.pdf",
-        content_type: 'application/pdf',
+        content_type: "application/pdf"
       )
 
       credit_note.save!
     end
 
-    def should_send_webhook?
-      context == 'api'
+    def should_generate_pdf?
+      context == "admin" || credit_note.file.blank?
+    end
+
+    def template
+      return "credit_notes/self_billed" if credit_note.invoice.self_billed?
+
+      "credit_notes/credit_note"
     end
   end
 end

@@ -2,15 +2,21 @@
 
 # NOTE: Generate invoices for the customers
 Subscription.all.find_each do |subscription|
-  Invoices::SubscriptionService.new(
-    subscriptions: [subscription],
-    timestamp: Time.zone.now - 2.months,
-    recurring: true,
-  ).create
+  invoice_count = (Time.current - subscription.subscription_at).fdiv(1.month).round
+
+  (0..invoice_count).each do |offset|
+    Invoices::SubscriptionService.call(
+      subscriptions: [subscription],
+      timestamp: Time.current - offset.months + 1.day,
+      invoicing_reason: :subscription_periodic
+    )
+  end
 end
 
 Invoice.all.find_each do |invoice|
   fee = invoice.fees.sample
+  next if fee.nil?
+
   amount = fee.amount_cents / 2
   next if amount.zero?
 
@@ -26,14 +32,13 @@ Invoice.all.find_each do |invoice|
     total_amount_cents: amount,
     total_amount_currency: fee.amount_currency,
     issuing_date: Time.current.to_date,
-    vat_amount_currency: fee.amount_currency,
-    vat_amount_cents: fee.vat_amount_cents,
+    taxes_amount_cents: fee.taxes_amount_cents
   )
 
   credit_note.items.create!(
     fee:,
     amount_cents: amount,
     precise_amount_cents: amount,
-    amount_currency: fee.amount_currency,
+    amount_currency: fee.amount_currency
   )
 end

@@ -10,7 +10,7 @@ module CreditNotes
       valid_global_amount?
 
       if errors?
-        result.validation_failure!(errors: errors)
+        result.validation_failure!(errors:)
         return false
       end
 
@@ -42,17 +42,23 @@ module CreditNotes
     end
 
     def total_items_amount_cents
-      credit_note.items.sum do |item|
-        item.precise_amount_cents + (item.precise_amount_cents * item.fee.vat_rate).fdiv(100)
-      end.round
+      (
+        credit_note.items.sum(&:precise_amount_cents) -
+        credit_note.precise_coupons_adjustment_amount_cents +
+        credit_note.precise_taxes_amount_cents
+      ).round
     end
 
     def valid_invoice_status?
       if credit_note.refund_amount_cents.positive?
-        return true if invoice.succeeded?
+        return true if invoice.payment_succeeded?
 
-        add_error(field: :refund_amount_cents, error_code: 'cannot_refund_unpaid_invoice')
-        return false
+        if !invoice.payment_succeeded? &&
+            invoice.total_paid_amount_cents == invoice.total_amount_cents && invoice.total_amount_cents > 0
+          add_error(field: :refund_amount_cents, error_code: "cannot_refund_unpaid_invoice")
+
+          return false
+        end
       end
 
       true
@@ -61,7 +67,7 @@ module CreditNotes
     def valid_invoice_type?
       return unless invoice.credit?
 
-      add_error(field: :base, error_code: 'cannot_credit_invoice')
+      add_error(field: :base, error_code: "cannot_credit_invoice")
       false
     end
 
@@ -69,28 +75,32 @@ module CreditNotes
     def valid_items_amount?
       return true if total_amount_cents == total_items_amount_cents
 
-      add_error(field: :base, error_code: 'does_not_match_item_amounts')
+      add_error(field: :base, error_code: "does_not_match_item_amounts")
     end
 
     # NOTE: Check if refunded amount is less than or equal to invoice total amount
     def valid_refund_amount?
       return true if credit_note.refund_amount_cents <= invoice.total_amount_cents - refunded_invoice_amount_cents
 
-      add_error(field: :refund_amount_cents, error_code: 'higher_than_remaining_invoice_amount')
+      add_error(field: :refund_amount_cents, error_code: "higher_than_remaining_invoice_amount")
     end
 
     # NOTE: Check if credited amount is less than or equal to invoice fee amount
     def valid_credit_amount?
+      if invoice.credit? && credit_note.credit_amount_cents > 0
+        add_error(field: :credit_amount_cents, error_code: "cannot_credit_invoice")
+      end
+
       return true if credit_note.credit_amount_cents <= invoice.fee_total_amount_cents - credited_invoice_amount_cents
 
-      add_error(field: :credit_amount_cents, error_code: 'higher_than_remaining_invoice_amount')
+      add_error(field: :credit_amount_cents, error_code: "higher_than_remaining_invoice_amount")
     end
 
     # NOTE: Check if total amount is less than or equal to invoice fee amount
     def valid_global_amount?
       return true if total_amount_cents <= invoice.fee_total_amount_cents - invoice_credit_note_total_amount_cents
 
-      add_error(field: :base, error_code: 'higher_than_remaining_invoice_amount')
+      add_error(field: :base, error_code: "higher_than_remaining_invoice_amount")
     end
   end
 end

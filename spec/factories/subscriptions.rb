@@ -6,19 +6,20 @@ FactoryBot.define do
     plan
     status { :active }
     external_id { SecureRandom.uuid }
+    started_at { 1.day.ago }
 
-    factory :active_subscription do
-      status { :active }
-      started_at { Time.zone.now }
-    end
-
-    factory :pending_subscription do
+    trait :pending do
       status { :pending }
     end
 
-    factory :terminated_subscription do
+    trait :terminated do
       status { :terminated }
+      started_at { 1.month.ago }
       terminated_at { Time.zone.now }
+    end
+
+    trait :calendar do
+      billing_time { :calendar }
     end
   end
 end

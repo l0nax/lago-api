@@ -5,13 +5,13 @@ module AuthenticableApiUser
 
   private
 
-  def ready?(*)
-    return true if context[:current_user]
+  def ready?(**args)
+    raise unauthorized_error unless context[:current_user]
 
-    raise unauthorized_error
+    super
   end
 
   def unauthorized_error
-    GraphQL::ExecutionError.new('unauthorized', extensions: { status: :unauthorized, code: 'unauthorized' })
+    GraphQL::ExecutionError.new("unauthorized", extensions: {status: :unauthorized, code: "unauthorized"})
   end
 end
